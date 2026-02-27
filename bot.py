@@ -612,4 +612,178 @@ async def details(ctx, *, extra: str):
 async def describe(ctx, *, description: str):
     await generate_server_plan(ctx, description)
 
+async def parse_edit_instruction(instruction: str, guild: discord.Guild):
+    # Build context about current server state
+    categories = [f"{cat.name}: {[ch.name for ch in cat.channels]}" for cat in guild.categories]
+    server_context = "\n".join(categories)
+
+    edit_prompt = f"""
+You are a Discord server editor. The user wants to make a change to their server.
+Current server structure:
+{server_context}
+
+User instruction: {instruction}
+
+Return ONLY valid JSON with exactly this structure depending on the action:
+
+For adding a text channel:
+{{"action": "add_channel", "type": "text", "name": "channel-name", "category": "EXACT CATEGORY NAME", "topic": "channel topic"}}
+
+For adding a voice channel:
+{{"action": "add_channel", "type": "voice", "name": "Channel Name", "category": "EXACT CATEGORY NAME"}}
+
+For adding a category:
+{{"action": "add_category", "name": "CATEGORY NAME"}}
+
+For renaming a channel:
+{{"action": "rename_channel", "old_name": "old-channel-name", "new_name": "new-channel-name"}}
+
+For renaming a category:
+{{"action": "rename_category", "old_name": "OLD CATEGORY NAME", "new_name": "NEW CATEGORY NAME"}}
+
+For deleting a channel:
+{{"action": "delete_channel", "name": "channel-name"}}
+
+For deleting a category:
+{{"action": "delete_category", "name": "CATEGORY NAME"}}
+
+For adding a role:
+{{"action": "add_role", "name": "Role Name", "color": "0xHEXCOLOR", "type": "decorative"}}
+
+Rules:
+- Use EXACT names from the current server structure shown above
+- Channel names must be lowercase with hyphens
+- Category names must match exactly as shown
+- Return only one action at a time
+"""
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": edit_prompt},
+            {"role": "user", "content": instruction}
+        ]
+    )
+    return extract_json(response.choices[0].message.content)
+
+@bot.command()
+async def edit(ctx, *, instruction: str):
+    guild = ctx.guild
+    progress_msg = await ctx.send(f"✏️ Processing: *{instruction}*...")
+
+    try:
+        action_data = await parse_edit_instruction(instruction, guild)
+
+        if not action_data:
+            await progress_msg.edit(content="❌ Couldn't understand that instruction. Try being more specific!")
+            return
+
+        action = action_data.get("action")
+
+        # Add a channel
+        if action == "add_channel":
+            category = discord.utils.get(guild.categories, name=action_data.get("category"))
+            if action_data.get("type") == "voice":
+                channel = await guild.create_voice_channel(
+                    name=action_data["name"],
+                    category=category
+                )
+            else:
+                channel = await guild.create_text_channel(
+                    name=action_data["name"],
+                    category=category,
+                    topic=action_data.get("topic", "")
+                )
+            embed = discord.Embed(
+                title="✅ Channel Added!",
+                description=f"Created **{channel.name}** in **{category.name if category else 'No Category'}**",
+                color=discord.Color.green()
+            )
+
+        # Add a category
+        elif action == "add_category":
+            category = await guild.create_category(action_data["name"])
+            embed = discord.Embed(
+                title="✅ Category Added!",
+                description=f"Created category **{category.name}**",
+                color=discord.Color.green()
+            )
+
+        # Rename a channel
+        elif action == "rename_channel":
+            channel = discord.utils.get(guild.channels, name=action_data["old_name"])
+            if not channel:
+                await progress_msg.edit(content=f"❌ Couldn't find channel **{action_data['old_name']}**")
+                return
+            old_name = channel.name
+            await channel.edit(name=action_data["new_name"])
+            embed = discord.Embed(
+                title="✅ Channel Renamed!",
+                description=f"**{old_name}** → **{action_data['new_name']}**",
+                color=discord.Color.green()
+            )
+
+        # Rename a category
+        elif action == "rename_category":
+            category = discord.utils.get(guild.categories, name=action_data["old_name"])
+            if not category:
+                await progress_msg.edit(content=f"❌ Couldn't find category **{action_data['old_name']}**")
+                return
+            old_name = category.name
+            await category.edit(name=action_data["new_name"])
+            embed = discord.Embed(
+                title="✅ Category Renamed!",
+                description=f"**{old_name}** → **{action_data['new_name']}**",
+                color=discord.Color.green()
+            )
+
+        # Delete a channel
+        elif action == "delete_channel":
+            channel = discord.utils.get(guild.channels, name=action_data["name"])
+            if not channel:
+                await progress_msg.edit(content=f"❌ Couldn't find channel **{action_data['name']}**")
+                return
+            await channel.delete()
+            embed = discord.Embed(
+                title="🗑️ Channel Deleted!",
+                description=f"Deleted **{action_data['name']}**",
+                color=discord.Color.red()
+            )
+
+        # Delete a category
+        elif action == "delete_category":
+            category = discord.utils.get(guild.categories, name=action_data["name"])
+            if not category:
+                await progress_msg.edit(content=f"❌ Couldn't find category **{action_data['name']}**")
+                return
+            await category.delete()
+            embed = discord.Embed(
+                title="🗑️ Category Deleted!",
+                description=f"Deleted **{action_data['name']}**",
+                color=discord.Color.red()
+            )
+
+        # Add a role
+        elif action == "add_role":
+            color_value = int(action_data.get("color", "0x3498db"), 16)
+            role = await guild.create_role(
+                name=action_data["name"],
+                color=discord.Color(color_value),
+                mentionable=True
+            )
+            embed = discord.Embed(
+                title="✅ Role Added!",
+                description=f"Created role **{role.name}**",
+                color=discord.Color.green()
+            )
+
+        else:
+            await progress_msg.edit(content="❌ Unknown action. Try rephrasing your instruction!")
+            return
+
+        await progress_msg.edit(content=None, embed=embed)
+
+    except Exception as e:
+        await progress_msg.edit(content=f"❌ Something went wrong: {str(e)}")
+
 bot.run(os.getenv("DISCORD_TOKEN"))
