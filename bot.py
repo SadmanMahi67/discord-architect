@@ -222,6 +222,12 @@ class RoleView(discord.ui.View):
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
     bot.add_view(RoleView([]))
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name="!guide for commands"
+        )
+    )
 
 @bot.command()
 async def hello(ctx):
