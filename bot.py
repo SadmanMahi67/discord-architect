@@ -18,6 +18,45 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+SERVER_TEMPLATES = {
+    "gaming": {
+        "emoji": "🎮",
+        "label": "Gaming",
+        "description": "A server for gamers with game channels, voice rooms, and gaming roles",
+        "hint": "gaming server with channels for different games, game night planning, clips and screenshots"
+    },
+    "study": {
+        "emoji": "📚",
+        "label": "Study",
+        "description": "A focused study server with subject channels and study rooms",
+        "hint": "study server with subject channels, study rooms, resource sharing, and focus timers"
+    },
+    "anime": {
+        "emoji": "🎌",
+        "label": "Anime",
+        "description": "An anime community with discussion channels and watch parties",
+        "hint": "anime server with discussion channels, watch party rooms, fan art sharing, and seasonal anime chat"
+    },
+    "business": {
+        "emoji": "💼",
+        "label": "Business",
+        "description": "A professional workspace with project and team channels",
+        "hint": "professional business server with project channels, team meetings, announcements and file sharing"
+    },
+    "creative": {
+        "emoji": "🎨",
+        "label": "Creative",
+        "description": "A creative community for artists, writers and musicians",
+        "hint": "creative server with art sharing, writing workshops, music rooms, and feedback channels"
+    },
+    "custom": {
+        "emoji": "🎲",
+        "label": "Custom",
+        "description": "Describe your own server from scratch",
+        "hint": None
+    }
+}
+
 # ── The system prompt we send to the LLM ──────────────────────────────────────
 SYSTEM_PROMPT = """
 You are a Discord server architect. Convert the user's request into a JSON server template.
@@ -108,6 +147,42 @@ def extract_json(text):
             pass
     return None
 
+class TemplateButton(discord.ui.Button):
+    def __init__(self, key: str, data: dict):
+        super().__init__(
+            label=f"{data['emoji']} {data['label']}",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"template_{key}"
+        )
+        self.key = key
+        self.data = data
+
+    async def callback(self, interaction: discord.Interaction):
+        bot.selected_template = self.key
+
+        if self.key == "custom":
+            embed = discord.Embed(
+                title="🎲 Custom Server",
+                description="Describe your server in detail and I'll build it for you!",
+                color=discord.Color.blurple()
+            )
+            embed.set_footer(text="Type !describe <your description> to continue")
+            await interaction.response.edit_message(embed=embed, view=None)
+        else:
+            embed = discord.Embed(
+                title=f"{self.data['emoji']} {self.data['label']} Template Selected!",
+                description=f"Any extra details to add? For example: number of members, specific games, topics etc.\n\nOr type `!build` to generate with defaults!",
+                color=discord.Color.blurple()
+            )
+            embed.set_footer(text=f"Type !details <your extras> or !build to continue")
+            await interaction.response.edit_message(embed=embed, view=None)
+
+class TemplateView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+        for key, data in SERVER_TEMPLATES.items():
+            self.add_item(TemplateButton(key, data))
+
 class RoleButton(discord.ui.Button):
     def __init__(self, role_name: str, role_id: int):
         super().__init__(
@@ -156,13 +231,10 @@ async def hello(ctx):
 async def ping(ctx):
     await ctx.send(f"Pong! Latency: {round(bot.latency * 1000)}ms")
 
-@bot.command()
-async def setup(ctx, *, user_input: str):
-    # Tell the user we're thinking
-    thinking_msg = await ctx.send("🧠 Thinking up your server layout...")
+async def generate_server_plan(ctx, user_input: str):
+    thinking_msg = await ctx.send("🧠 Generating your server plan...")
 
     try:
-        # Send to Groq
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
@@ -171,15 +243,12 @@ async def setup(ctx, *, user_input: str):
             ]
         )
         raw_text = response.choices[0].message.content
-
-        # Parse the JSON
         server_template = extract_json(raw_text)
 
         if not server_template:
             await thinking_msg.edit(content="❌ Couldn't parse the AI response. Try again!")
             return
 
-        # Pretty print the JSON so user can see the plan
         pretty = json.dumps(server_template, indent=2)
 
         embed = discord.Embed(
@@ -193,12 +262,28 @@ async def setup(ctx, *, user_input: str):
         embed.set_footer(text="Type !confirm to build it • !cancel to scrap it")
         await thinking_msg.edit(content=None, embed=embed)
 
-        # Save the template temporarily so !confirm can use it
         bot.pending_template = server_template
+        bot.selected_template = None
         bot.pending_ctx = ctx
 
     except Exception as e:
         await thinking_msg.edit(content=f"❌ Error: {str(e)}")
+
+@bot.command()
+async def setup(ctx):
+    embed = discord.Embed(
+        title="🏗️ Architect AI — Choose a Template",
+        description="Pick a theme to get started! The AI will customize it based on your choice.",
+        color=discord.Color.blurple()
+    )
+    for key, data in SERVER_TEMPLATES.items():
+        embed.add_field(
+            name=f"{data['emoji']} {data['label']}",
+            value=data['description'],
+            inline=True
+        )
+    embed.set_footer(text="Click a button below to select your template")
+    await ctx.send(embed=embed, view=TemplateView())
 
 @bot.command()
 async def cancel(ctx):
@@ -498,5 +583,33 @@ async def on_member_join(member):
         content=f"Everyone welcome {member.mention} to the server! 🎉",
         embed=embed
     )
+
+@bot.command()
+async def build(ctx):
+    if not hasattr(bot, 'selected_template') or bot.selected_template is None:
+        await ctx.send("❌ Pick a template first with `!setup`!")
+        return
+
+    template_key = bot.selected_template
+    template_data = SERVER_TEMPLATES[template_key]
+    hint = template_data["hint"] or "a general purpose server"
+
+    await generate_server_plan(ctx, hint)
+
+@bot.command()
+async def details(ctx, *, extra: str):
+    if not hasattr(bot, 'selected_template') or bot.selected_template is None:
+        await ctx.send("❌ Pick a template first with `!setup`!")
+        return
+
+    template_key = bot.selected_template
+    template_data = SERVER_TEMPLATES[template_key]
+    hint = f"{template_data['hint']} — extra details: {extra}"
+
+    await generate_server_plan(ctx, hint)
+
+@bot.command()
+async def describe(ctx, *, description: str):
+    await generate_server_plan(ctx, description)
 
 bot.run(os.getenv("DISCORD_TOKEN"))
