@@ -18,6 +18,20 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+STATE_FILE = "state.json"
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_state(data: dict):
+    current = load_state()
+    current.update(data)
+    with open(STATE_FILE, "w") as f:
+        json.dump(current, f, indent=2)
+
 SERVER_TEMPLATES = {
     "gaming": {
         "emoji": "🎮",
@@ -252,6 +266,11 @@ class RoleView(discord.ui.View):
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
     bot.add_view(RoleView([]))
+    # Load saved state so member role survives restarts
+    state = load_state()
+    if "member_role_id" in state:
+        bot.member_role_id = state["member_role_id"]
+        print(f"✅ Loaded member role ID: {bot.member_role_id}")
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
@@ -485,6 +504,8 @@ async def confirm(ctx):
 
         # Save member role id for future joins
         bot.member_role_id = member_role.id if member_role else None
+        if member_role:
+            save_state({"member_role_id": member_role.id})
 
         # Step 3 — Create Categories and Channels
         await progress_msg.edit(content="📁 Creating categories and channels...")
