@@ -610,6 +610,7 @@ async def guide(ctx):
         value="Scrap the current plan without building",
         inline=False
     )
+    embed.add_field(name="📖 More Commands", value="`!modguide` — Moderation commands\n`!funguide` — Fun & misc commands", inline=False)
     embed.set_footer(text="Architect AI • Built with discord.py + Groq")
     await ctx.send(embed=embed)
 
@@ -857,5 +858,391 @@ async def edit(ctx, *, instruction: str):
 
     except Exception as e:
         await progress_msg.edit(content=f"❌ Something went wrong: {str(e)}")
+
+# ── MOD LOG HELPER ───────────────────────────────────────────────────────────────────────────────
+async def log_mod_action(guild, action: str, moderator, target, reason: str = "No reason provided"):
+    log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
+    if not log_channel:
+        log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+    if not log_channel:
+        return
+
+    colors = {
+        "KICK": discord.Color.orange(),
+        "BAN": discord.Color.red(),
+        "TIMEOUT": discord.Color.yellow(),
+        "UNTIMEOUT": discord.Color.green(),
+        "WARN": discord.Color.gold(),
+        "PROMOTE": discord.Color.blue(),
+        "DEMOTE": discord.Color.purple()
+    }
+
+    embed = discord.Embed(
+        title=f"🔨 Mod Action — {action}",
+        color=colors.get(action, discord.Color.greyple()),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Target", value=f"{target.mention} ({target.name})", inline=True)
+    embed.add_field(name="Moderator", value=f"{moderator.mention} ({moderator.name})", inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.set_footer(text=f"User ID: {target.id}")
+    await log_channel.send(embed=embed)
+
+
+# ── MOD COMMANDS ──────────────────────────────────────────────────────────────────────────────
+
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def promote(ctx, member: discord.Member, *, role_type: str = "mod"):
+    guild = ctx.guild
+    role_type = role_type.lower().strip()
+
+    if role_type in ["mod", "moderator"]:
+        role = discord.utils.get(guild.roles, name="Moderator")
+    elif role_type in ["admin", "administrator"]:
+        role = discord.utils.get(guild.roles, name="Admin")
+    else:
+        role = discord.utils.get(guild.roles, name=role_type)
+
+    if not role:
+        await ctx.send(f"❌ Couldn't find a role matching **{role_type}**. Try `mod` or `admin`.")
+        return
+
+    await member.add_roles(role)
+    embed = discord.Embed(
+        title="⬆️ Member Promoted!",
+        description=f"{member.mention} has been promoted to **{role.name}**!",
+        color=discord.Color.blue()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log_mod_action(guild, "PROMOTE", ctx.author, member, f"Promoted to {role.name}")
+
+
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def demote(ctx, member: discord.Member):
+    guild = ctx.guild
+    staff_roles = ["Admin", "Moderator"]
+    removed = []
+
+    for role_name in staff_roles:
+        role = discord.utils.get(member.roles, name=role_name)
+        if role:
+            await member.remove_roles(role)
+            removed.append(role.name)
+
+    if not removed:
+        await ctx.send(f"❌ {member.mention} doesn't have any staff roles.")
+        return
+
+    embed = discord.Embed(
+        title="⬇️ Member Demoted!",
+        description=f"{member.mention} had **{', '.join(removed)}** removed.",
+        color=discord.Color.purple()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log_mod_action(guild, "DEMOTE", ctx.author, member, f"Removed roles: {', '.join(removed)}")
+
+
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    await member.kick(reason=reason)
+    embed = discord.Embed(
+        title="🥢 Member Kicked!",
+        description=f"{member.mention} has been kicked.",
+        color=discord.Color.orange()
+    )
+    embed.add_field(name="Reason", value=reason)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log_mod_action(ctx.guild, "KICK", ctx.author, member, reason)
+
+
+@bot.command()
+@commands.has_permissions(ban_members=True)
+async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    await member.ban(reason=reason)
+    embed = discord.Embed(
+        title="🔨 Member Banned!",
+        description=f"{member.mention} has been banned.",
+        color=discord.Color.red()
+    )
+    embed.add_field(name="Reason", value=reason)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log_mod_action(ctx.guild, "BAN", ctx.author, member, reason)
+
+
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def timeout(ctx, member: discord.Member, duration: str = "10m", *, reason: str = "No reason provided"):
+    # Parse duration
+    time_units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    unit = duration[-1].lower()
+    if unit not in time_units or not duration[:-1].isdigit():
+        await ctx.send("❌ Invalid duration! Use formats like `10m`, `1h`, `2d`, `30s`")
+        return
+
+    seconds = int(duration[:-1]) * time_units[unit]
+    if seconds > 2419200:
+        await ctx.send("❌ Timeout can't be longer than 28 days!")
+        return
+
+    until = discord.utils.utcnow() + datetime.timedelta(seconds=seconds)
+    await member.timeout(until, reason=reason)
+
+    embed = discord.Embed(
+        title="⏱️ Member Timed Out!",
+        description=f"{member.mention} has been timed out for **{duration}**.",
+        color=discord.Color.yellow()
+    )
+    embed.add_field(name="Reason", value=reason)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log_mod_action(ctx.guild, "TIMEOUT", ctx.author, member, f"{duration} — {reason}")
+
+
+@bot.command()
+@commands.has_permissions(moderate_members=True)
+async def untimeout(ctx, member: discord.Member):
+    await member.timeout(None)
+    embed = discord.Embed(
+        title="✅ Timeout Removed!",
+        description=f"{member.mention}'s timeout has been removed.",
+        color=discord.Color.green()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log_mod_action(ctx.guild, "UNTIMEOUT", ctx.author, member, "Timeout removed")
+
+
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    try:
+        warn_embed = discord.Embed(
+            title=f"⚠️ Warning from {ctx.guild.name}",
+            description=f"You have received a warning.",
+            color=discord.Color.gold()
+        )
+        warn_embed.add_field(name="Reason", value=reason)
+        warn_embed.set_footer(text="Please follow the server rules.")
+        await member.send(embed=warn_embed)
+        dm_sent = True
+    except:
+        dm_sent = False
+
+    embed = discord.Embed(
+        title="⚠️ Member Warned!",
+        description=f"{member.mention} has been warned.{'✉️ DM sent!' if dm_sent else ' *(Could not DM user)*'}",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="Reason", value=reason)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await ctx.send(embed=embed)
+    await log_mod_action(ctx.guild, "WARN", ctx.author, member, reason)
+
+
+# Error handler for missing permissions
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You don't have permission to use this command!")
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ Member not found! Make sure you @mention them correctly.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Missing argument! Use `!guide` or `!modguide` for help.")
+
+
+# ── FUN COMMANDS ──────────────────────────────────────────────────────────────────────────────
+
+import random
+import datetime
+
+@bot.command()
+async def coinflip(ctx):
+    result = random.choice(["Heads", "Tails"])
+    emoji = "🪙" if result == "Heads" else "🌑"
+    embed = discord.Embed(
+        title=f"{emoji} {result}!",
+        color=discord.Color.gold()
+    )
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def pick(ctx, *options: str):
+    if len(options) < 2:
+        await ctx.send("❌ Give me at least 2 options! Example: `!pick pizza burger sushi`")
+        return
+    chosen = random.choice(options)
+    embed = discord.Embed(
+        title="🎲 I Pick...",
+        description=f"**{chosen}**",
+        color=discord.Color.blurple()
+    )
+    embed.set_footer(text=f"Chosen from: {', '.join(options)}")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def poll(ctx, question: str, *options: str):
+    if len(options) < 2:
+        await ctx.send('\u274c Need at least 2 options!\nExample: `!poll "Best game?" "Valorant" "Minecraft" "GTA"`')
+        return
+    if len(options) > 9:
+        await ctx.send("❌ Maximum 9 options per poll!")
+        return
+
+    emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
+    description = "\n\n".join([f"{emojis[i]} {opt}" for i, opt in enumerate(options)])
+
+    embed = discord.Embed(
+        title=f"📊 {question}",
+        description=description,
+        color=discord.Color.blurple()
+    )
+    embed.set_footer(text=f"Poll by {ctx.author.name}")
+    poll_msg = await ctx.send(embed=embed)
+    for i in range(len(options)):
+        await poll_msg.add_reaction(emojis[i])
+
+
+@bot.command()
+async def quote(ctx):
+    thinking = await ctx.send("💭 Getting a quote...")
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": 'Generate a single short inspiring or funny quote. Return ONLY the quote and author in this format: {"quote": "quote text here", "author": "Author Name"}. No extra text.'},
+                {"role": "user", "content": "Give me a quote"}
+            ]
+        )
+        data = extract_json(response.choices[0].message.content)
+        if data:
+            embed = discord.Embed(
+                title="💬 Quote",
+                description=f'*"{data["quote"]}"*',
+                color=discord.Color.blurple()
+            )
+            embed.set_footer(text=f"\u2014 {data['author']}")
+            await thinking.edit(content=None, embed=embed)
+        else:
+            await thinking.edit(content="❌ Couldn't get a quote, try again!")
+    except Exception as e:
+        await thinking.edit(content=f"❌ Error: {str(e)}")
+
+
+@bot.command()
+async def topic(ctx):
+    thinking = await ctx.send("💭 Thinking of a topic...")
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "Generate a single fun, interesting conversation starter for a friend group. Keep it under 20 words. Return ONLY the question, nothing else."},
+                {"role": "user", "content": "Give me a conversation starter"}
+            ]
+        )
+        topic_text = response.choices[0].message.content.strip()
+        embed = discord.Embed(
+            title="💬 Conversation Starter",
+            description=f"**{topic_text}**",
+            color=discord.Color.green()
+        )
+        embed.set_footer(text=f"Requested by {ctx.author.name}")
+        await thinking.edit(content=None, embed=embed)
+    except Exception as e:
+        await thinking.edit(content=f"❌ Error: {str(e)}")
+
+
+# ── GUIDE COMMANDS ────────────────────────────────────────────────────────────────────────────
+
+@bot.command()
+async def modguide(ctx):
+    embed = discord.Embed(
+        title="🔨 Architect AI — Mod Commands",
+        description="Staff-only moderation commands",
+        color=discord.Color.red()
+    )
+    embed.add_field(
+        name="!promote @user mod/admin",
+        value="Promotes a user to Mod or Admin\nExample: `!promote @John mod`",
+        inline=False
+    )
+    embed.add_field(
+        name="!demote @user",
+        value="Removes all staff roles from a user\nExample: `!demote @John`",
+        inline=False
+    )
+    embed.add_field(
+        name="!kick @user reason",
+        value="Kicks a member from the server\nExample: `!kick @John breaking rules`",
+        inline=False
+    )
+    embed.add_field(
+        name="!ban @user reason",
+        value="Permanently bans a member\nExample: `!ban @John spamming`",
+        inline=False
+    )
+    embed.add_field(
+        name="!timeout @user duration reason",
+        value="Mutes a member for a duration\nDuration formats: `30s` `10m` `2h` `1d`\nExample: `!timeout @John 10m spamming`",
+        inline=False
+    )
+    embed.add_field(
+        name="!untimeout @user",
+        value="Removes a timeout early\nExample: `!untimeout @John`",
+        inline=False
+    )
+    embed.add_field(
+        name="!warn @user reason",
+        value="Sends user a DM warning and logs it\nExample: `!warn @John please follow the rules`",
+        inline=False
+    )
+    embed.set_footer(text="All mod actions are logged in #mod-logs • Use !guide for setup commands")
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def funguide(ctx):
+    embed = discord.Embed(
+        title="🎮 Architect AI — Fun Commands",
+        description="Fun and misc commands for everyone",
+        color=discord.Color.green()
+    )
+    embed.add_field(
+        name="!coinflip",
+        value="Flips a coin\nExample: `!coinflip`",
+        inline=False
+    )
+    embed.add_field(
+        name="!pick option1 option2 ...",
+        value="Randomly picks one of your options\nExample: `!pick pizza burger sushi`",
+        inline=False
+    )
+    embed.add_field(
+        name='!poll "question" "option1" "option2"',
+        value="Creates a poll with reactions\nExample: `!poll \"Best game?\" \"Valorant\" \"Minecraft\"`",
+        inline=False
+    )
+    embed.add_field(
+        name="!quote",
+        value="Gets an AI-generated inspiring quote\nExample: `!quote`",
+        inline=False
+    )
+    embed.add_field(
+        name="!topic",
+        value="Gets an AI-generated conversation starter\nExample: `!topic`",
+        inline=False
+    )
+    embed.set_footer(text="Use !guide for setup commands • !modguide for mod commands")
+    await ctx.send(embed=embed)
+
 
 bot.run(os.getenv("DISCORD_TOKEN"))
