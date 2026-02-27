@@ -276,16 +276,46 @@ async def generate_server_plan(ctx, user_input: str):
             await thinking_msg.edit(content="❌ Couldn't parse the AI response. Try again!")
             return
 
-        pretty = json.dumps(server_template, indent=2)
+        # Build a clean human-readable summary instead of raw JSON
+        categories_summary = ""
+        for cat in server_template.get("categories", []):
+            text_channels = [ch["name"] for ch in cat.get("channels", []) if ch["type"] == "text"]
+            voice_channels = [ch["name"] for ch in cat.get("channels", []) if ch["type"] == "voice"]
+            categories_summary += f"\n**{cat['name']}**\n"
+            if text_channels:
+                categories_summary += f"┣ 💬 {', '.join(text_channels)}\n"
+            if voice_channels:
+                categories_summary += f"┗ 🔊 {', '.join(voice_channels)}\n"
+
+        all_roles = server_template.get("roles", [])
+        staff_roles = [r["name"] for r in all_roles if r.get("type") in ["admin", "moderator", "member"]]
+        decorative_roles = [r["name"] for r in all_roles if r.get("type") == "decorative"]
+        color_roles = [r["name"] for r in all_roles if r.get("type") == "color"]
 
         embed = discord.Embed(
-            title="🏗️ Server Plan Ready!",
-            description=f"```json\n{pretty[:1800]}\n```",
+            title=f"🏗️ {server_template.get('server_name', 'Your Server')} — Ready to Build!",
             color=discord.Color.blue()
         )
-        embed.add_field(name="Server Name", value=server_template.get("server_name", "Unknown"), inline=True)
-        embed.add_field(name="Roles", value=str(len(server_template.get("roles", []))), inline=True)
-        embed.add_field(name="Categories", value=str(len(server_template.get("categories", []))), inline=True)
+        embed.add_field(
+            name="📁 Channels & Categories",
+            value=categories_summary[:1024] if categories_summary else "None",
+            inline=False
+        )
+        embed.add_field(
+            name="👑 Staff Roles",
+            value=", ".join(staff_roles) if staff_roles else "None",
+            inline=True
+        )
+        embed.add_field(
+            name="🎭 Identity Roles",
+            value=", ".join(decorative_roles) if decorative_roles else "None",
+            inline=True
+        )
+        embed.add_field(
+            name="🎨 Color Roles",
+            value=", ".join(color_roles) if color_roles else "None",
+            inline=True
+        )
         embed.set_footer(text="Type !confirm to build it • !cancel to scrap it")
         await thinking_msg.edit(content=None, embed=embed)
 
