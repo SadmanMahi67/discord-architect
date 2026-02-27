@@ -129,6 +129,20 @@ Rules:
 - Member color should be neutral (grey, white, etc)
 - Decorative roles should have fun vibrant colors
 - roles_channel is always "get-your-roles"
+- Always include a private staff category at the end called "〔🔒〕STAFF ONLY" with these channels:
+  {"name": "「📋」mod-logs", "type": "text", "topic": "Moderation logs and actions", "staff_only": true},
+  {"name": "「💬」staff-chat", "type": "text", "topic": "Private staff discussion", "staff_only": true},
+  {"name": "「🤖」bot-commands", "type": "text", "topic": "Bot commands for staff", "staff_only": true},
+  {"name": "🔊・staff-voice", "type": "voice", "staff_only": true}
+- Mark all channels in this category with "staff_only": true
+- Always include these pastel color roles at the end of the roles list with type "color":
+  {"name": "🌸 Pink", "color": "0xFFB7C5", "type": "color"},
+  {"name": "🍋 Yellow", "color": "0xFDFD96", "type": "color"},
+  {"name": "🍵 Mint", "color": "0x98FF98", "type": "color"},
+  {"name": "🩵 Blue", "color": "0xAEC6CF", "type": "color"},
+  {"name": "🍇 Lavender", "color": "0xE6E6FA", "type": "color"},
+  {"name": "🍑 Peach", "color": "0xFFCBA4", "type": "color"},
+  {"name": "🤍 White", "color": "0xFFFAFA", "type": "color"}
 """
 
 def extract_json(text):
@@ -184,10 +198,10 @@ class TemplateView(discord.ui.View):
             self.add_item(TemplateButton(key, data))
 
 class RoleButton(discord.ui.Button):
-    def __init__(self, role_name: str, role_id: int):
+    def __init__(self, role_name: str, role_id: int, style=discord.ButtonStyle.primary):
         super().__init__(
             label=role_name,
-            style=discord.ButtonStyle.primary,
+            style=style,
             custom_id=f"role_{role_id}"
         )
         self.role_id = role_id
@@ -207,16 +221,23 @@ class RoleButton(discord.ui.Button):
                 f"✅ Removed **{role.name}** from you!", ephemeral=True
             )
         else:
+            # If it's a color role, remove other color roles first
+            if role.name.split()[1] if len(role.name.split()) > 1 else "" in ["Pink", "Yellow", "Mint", "Blue", "Lavender", "Peach", "White"]:
+                color_roles = [r for r in member.roles if r.name.split()[0] in ["🌸", "🍋", "🍵", "🩵", "🍇", "🍑", "🤍"]]
+                if color_roles:
+                    await member.remove_roles(*color_roles)
             await member.add_roles(role)
             await interaction.response.send_message(
                 f"🎉 You now have **{role.name}**!", ephemeral=True
             )
 
 class RoleView(discord.ui.View):
-    def __init__(self, roles: list):
+    def __init__(self, roles: list, color_roles: list = []):
         super().__init__(timeout=None)
         for role in roles:
-            self.add_item(RoleButton(role["name"], role["id"]))
+            self.add_item(RoleButton(role["name"], role["id"], discord.ButtonStyle.primary))
+        for role in color_roles:
+            self.add_item(RoleButton(role["name"], role["id"], discord.ButtonStyle.secondary))
 
 @bot.event
 async def on_ready():
@@ -407,6 +428,20 @@ async def confirm(ctx):
             category = await guild.create_category(category_data["name"])
             created["categories"].append(category.id)
 
+            # If staff only category, hide it from everyone except admin and mod
+            is_staff_category = "STAFF" in category_data["name"].upper()
+            if is_staff_category:
+                # Hide from @everyone
+                await category.set_permissions(guild.default_role, read_messages=False)
+                # Show to admin and mod roles
+                for r in template.get("roles", []):
+                    if r.get("type") in ["admin", "moderator"] and r["name"] in role_objects:
+                        await category.set_permissions(
+                            role_objects[r["name"]],
+                            read_messages=True,
+                            send_messages=True
+                        )
+
             for channel_data in category_data.get("channels", []):
                 if channel_data["type"] == "text":
                     channel = await guild.create_text_channel(
@@ -435,9 +470,20 @@ async def confirm(ctx):
             if r.get("type") == "decorative" and r["name"] in role_objects
         ]
 
-        view = RoleView(decorative_roles)
+        color_roles = [
+            {"name": r["name"], "id": role_objects[r["name"]].id}
+            for r in template.get("roles", [])
+            if r.get("type") == "color" and r["name"] in role_objects
+        ]
+
+        view = RoleView(decorative_roles, color_roles)
         await roles_channel.send(
-            content="**🎭 Get Your Roles!**\n\nClick a button below to get or remove a role!",
+            content=(
+                "**🎭 Get Your Roles!**\n\n"
+                "🔵 **Identity Roles** — Pick what describes you!\n"
+                "⚪ **Color Roles** — Pick your color! (one at a time)\n\n"
+                "Click any button to get or remove a role!"
+            ),
             view=view
         )
 
