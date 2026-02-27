@@ -215,20 +215,29 @@ class RoleButton(discord.ui.Button):
             await interaction.response.send_message("❌ Role not found!", ephemeral=True)
             return
 
+        # Detect if this is a color role by checking its name starts with a pastel emoji
+        pastel_emojis = ["🌸", "🍋", "🍵", "🩵", "🍇", "🍑", "🤍"]
+        is_color_role = any(role.name.startswith(emoji) for emoji in pastel_emojis)
+
         if role in member.roles:
             await member.remove_roles(role)
             await interaction.response.send_message(
-                f"✅ Removed **{role.name}** from you!", ephemeral=True
+                f"✅ Removed **{role.name}** from you!",
+                ephemeral=True
             )
         else:
-            # If it's a color role, remove other color roles first
-            if role.name.split()[1] if len(role.name.split()) > 1 else "" in ["Pink", "Yellow", "Mint", "Blue", "Lavender", "Peach", "White"]:
-                color_roles = [r for r in member.roles if r.name.split()[0] in ["🌸", "🍋", "🍵", "🩵", "🍇", "🍑", "🤍"]]
-                if color_roles:
-                    await member.remove_roles(*color_roles)
+            if is_color_role:
+                # Remove all other color roles first so only one color shows
+                color_roles_to_remove = [
+                    r for r in member.roles
+                    if any(r.name.startswith(emoji) for emoji in pastel_emojis)
+                ]
+                if color_roles_to_remove:
+                    await member.remove_roles(*color_roles_to_remove)
             await member.add_roles(role)
             await interaction.response.send_message(
-                f"🎉 You now have **{role.name}**!", ephemeral=True
+                f"🎉 You now have **{role.name}**!",
+                ephemeral=True
             )
 
 class RoleView(discord.ui.View):
@@ -429,6 +438,11 @@ async def confirm(ctx):
             else:
                 perms = decorative_perms
                 hoist = False
+
+            # Color roles need hoist=False but correct perms
+            if role_type == "color":
+                hoist = False
+                perms = decorative_perms
 
             role = await guild.create_role(
                 name=role_data["name"],
@@ -1270,7 +1284,17 @@ async def modguide(ctx):
         value="Sends user a DM warning and logs it\nExample: `!warn @John please follow the rules`",
         inline=False
     )
-    embed.set_footer(text="All mod actions are logged in #mod-logs • Use !guide for setup commands")
+    embed.add_field(
+        name="!addrole @user role name",
+        value="Manually gives a role to a user\nExample: `!addrole @John Moderator`",
+        inline=False
+    )
+    embed.add_field(
+        name="!removerole @user role name",
+        value="Manually removes a role from a user\nExample: `!removerole @John Moderator`",
+        inline=False
+    )
+    embed.set_footer(text="All mod actions are logged in #mod-logs • !guide for setup • !funguide for fun commands")
     await ctx.send(embed=embed)
 
 
@@ -1308,6 +1332,58 @@ async def funguide(ctx):
     )
     embed.set_footer(text="Use !guide for setup commands • !modguide for mod commands")
     await ctx.send(embed=embed)
+
+
+@bot.command()
+@commands.has_permissions(manage_roles=True)
+async def addrole(ctx, member: discord.Member, *, role_name: str):
+    guild = ctx.guild
+    role = discord.utils.get(guild.roles, name=role_name)
+
+    if not role:
+        await ctx.send(f"❌ Role **{role_name}** not found! Make sure the name is exact.")
+        return
+    if not is_higher_role(ctx.author, member):
+        await ctx.send("❌ You can't manage roles for someone with an equal or higher role than you!")
+        return
+    if role in member.roles:
+        await ctx.send(f"❌ {member.mention} already has **{role.name}**!")
+        return
+
+    await member.add_roles(role)
+    embed = discord.Embed(
+        title="✅ Role Added!",
+        description=f"Gave **{role.name}** to {member.mention}",
+        color=discord.Color.green()
+    )
+    await ctx.send(embed=embed)
+    await log_mod_action(ctx.guild, "PROMOTE", ctx.author, member, f"Manually added role: {role.name}")
+
+
+@bot.command()
+@commands.has_permissions(manage_roles=True)
+async def removerole(ctx, member: discord.Member, *, role_name: str):
+    guild = ctx.guild
+    role = discord.utils.get(guild.roles, name=role_name)
+
+    if not role:
+        await ctx.send(f"❌ Role **{role_name}** not found! Make sure the name is exact.")
+        return
+    if not is_higher_role(ctx.author, member):
+        await ctx.send("❌ You can't manage roles for someone with an equal or higher role than you!")
+        return
+    if role not in member.roles:
+        await ctx.send(f"❌ {member.mention} doesn't have **{role.name}**!")
+        return
+
+    await member.remove_roles(role)
+    embed = discord.Embed(
+        title="✅ Role Removed!",
+        description=f"Removed **{role.name}** from {member.mention}",
+        color=discord.Color.orange()
+    )
+    await ctx.send(embed=embed)
+    await log_mod_action(ctx.guild, "DEMOTE", ctx.author, member, f"Manually removed role: {role.name}")
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
