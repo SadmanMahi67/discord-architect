@@ -79,6 +79,7 @@ Rules:
 - Include 2-4 categories based on the theme
 - Include 3-5 channels per category
 - Always include a General category
+- Always include a 「👋」welcome channel in the General category as the first channel
 - Always include at least one voice channel per category
 - Always include exactly these role types: admin, moderator, member
 - Add 3-5 decorative roles that match the server theme (type: decorative)
@@ -454,5 +455,48 @@ async def help(ctx):
     )
     embed.set_footer(text="Architect AI • Built with discord.py + Groq")
     await ctx.send(embed=embed)
+
+@bot.event
+async def on_member_join(member):
+    guild = member.guild
+
+    # Find welcome channel — looks for one named welcome or general
+    welcome_channel = discord.utils.get(guild.text_channels, name="welcome")
+    if not welcome_channel:
+        welcome_channel = discord.utils.get(guild.text_channels, name="「👋」welcome")
+    if not welcome_channel:
+        # Fall back to first available text channel
+        welcome_channel = guild.text_channels[0] if guild.text_channels else None
+
+    if not welcome_channel:
+        return
+
+    embed = discord.Embed(
+        title=f"👋 Welcome to {guild.name}!",
+        description=(
+            f"Hey {member.mention}, we're glad you're here!\n\n"
+            f"📋 Check out the rules channel to get started.\n"
+            f"🎭 Head to **#get-your-roles** to pick your roles.\n"
+            f"💬 Introduce yourself and say hi!"
+        ),
+        color=discord.Color.blurple()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(
+        name="Account Created",
+        value=member.created_at.strftime("%b %d, %Y"),
+        inline=True
+    )
+    embed.add_field(
+        name="Member Count",
+        value=f"You are member #{guild.member_count}!",
+        inline=True
+    )
+    embed.set_footer(text=f"{guild.name} • Welcome aboard!")
+
+    await welcome_channel.send(
+        content=f"Everyone welcome {member.mention} to the server! 🎉",
+        embed=embed
+    )
 
 bot.run(os.getenv("DISCORD_TOKEN"))
