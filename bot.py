@@ -288,13 +288,13 @@ async def generate_server_plan(ctx, user_input: str):
         # Build a clean human-readable summary instead of raw JSON
         categories_summary = ""
         for cat in server_template.get("categories", []):
-            text_channels = [ch["name"] for ch in cat.get("channels", []) if ch["type"] == "text"]
-            voice_channels = [ch["name"] for ch in cat.get("channels", []) if ch["type"] == "voice"]
+            channels = cat.get("channels", [])
             categories_summary += f"\n**{cat['name']}**\n"
-            if text_channels:
-                categories_summary += f"┣ 💬 {', '.join(text_channels)}\n"
-            if voice_channels:
-                categories_summary += f"┗ 🔊 {', '.join(voice_channels)}\n"
+            for i, ch in enumerate(channels):
+                is_last = i == len(channels) - 1
+                prefix = "┗" if is_last else "┣"
+                icon = "🔊" if ch["type"] == "voice" else "💬"
+                categories_summary += f"{prefix} {icon} {ch['name']}\n"
 
         all_roles = server_template.get("roles", [])
         staff_roles = [r["name"] for r in all_roles if r.get("type") in ["admin", "moderator", "member"]]
