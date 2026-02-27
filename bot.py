@@ -28,14 +28,43 @@ Use this exact structure:
 {
   "server_name": "Server Name Here",
   "roles": [
-    {"name": "Role Name", "color": "0xHEXCOLOR", "mentionable": true}
+    {
+      "name": "Admin",
+      "color": "0xHEXCOLOR",
+      "mentionable": false,
+      "type": "admin"
+    },
+    {
+      "name": "Moderator",
+      "color": "0xHEXCOLOR",
+      "mentionable": true,
+      "type": "moderator"
+    },
+    {
+      "name": "Member",
+      "color": "0xHEXCOLOR",
+      "mentionable": false,
+      "type": "member"
+    },
+    {
+      "name": "Gamer",
+      "color": "0xHEXCOLOR",
+      "mentionable": false,
+      "type": "decorative"
+    },
+    {
+      "name": "Night Owl",
+      "color": "0xHEXCOLOR",
+      "mentionable": false,
+      "type": "decorative"
+    }
   ],
   "categories": [
     {
-      "name": "CATEGORY NAME",
+      "name": "╔══〔 🎮 GAMING ZONE 〕══╗",
       "channels": [
-        {"name": "channel-name", "type": "text", "topic": "Channel description"},
-        {"name": "Voice Room", "type": "voice"}
+        {"name": "「🎮」game-chat", "type": "text", "topic": "Channel description"},
+        {"name": "🔊・voice-lounge", "type": "voice"}
       ]
     }
   ],
@@ -43,12 +72,22 @@ Use this exact structure:
 }
 
 Rules:
-- Channel names must be lowercase with hyphens, no spaces
+- Channel names must be lowercase with hyphens after any emoji/decoration
+- Category names should have decorative borders/emojis that match the server theme
+- Text channel names should have a relevant emoji prefix like 「🎮」or 📚・
+- Voice channel names should start with 🔊・
 - Include 2-4 categories based on the theme
 - Include 3-5 channels per category
 - Always include a General category
 - Always include at least one voice channel per category
-- Pick role colors that match the theme
+- Always include exactly these role types: admin, moderator, member
+- Add 3-5 decorative roles that match the server theme (type: decorative)
+- These decorative roles appear in the self-roles channel for users to pick
+- Pick role colors that match the server theme
+- Admin color should feel powerful (gold, red, etc)
+- Moderator color should feel authoritative (blue, purple, etc)
+- Member color should be neutral (grey, white, etc)
+- Decorative roles should have fun vibrant colors
 - roles_channel is always "get-your-roles"
 """
 
@@ -188,21 +227,90 @@ async def confirm(ctx):
             "channels": []
         }
 
-        # Step 1 — Create Roles
-        await progress_msg.edit(content="🎨 Creating roles...")
+        # Define permissions for each role type
+        admin_perms = discord.Permissions(administrator=True)
+
+        moderator_perms = discord.Permissions(
+            kick_members=True,
+            ban_members=True,
+            manage_messages=True,
+            manage_channels=False,
+            read_messages=True,
+            send_messages=True,
+            embed_links=True,
+            attach_files=True,
+            read_message_history=True,
+            mention_everyone=True,
+            mute_members=True,
+            deafen_members=True,
+            move_members=True
+        )
+
+        member_perms = discord.Permissions(
+            read_messages=True,
+            send_messages=True,
+            embed_links=True,
+            attach_files=True,
+            read_message_history=True,
+            connect=True,
+            speak=True,
+            add_reactions=True,
+            use_application_commands=True
+        )
+
+        decorative_perms = discord.Permissions(
+            read_messages=True,
+            send_messages=True,
+            read_message_history=True,
+            connect=True,
+            speak=True
+        )
+
+        # Step 1 — Create Roles with permissions
+        await progress_msg.edit(content="🎨 Creating roles and permissions...")
+        role_objects = {}
+
         for role_data in template.get("roles", []):
             color_value = int(role_data.get("color", "0x3498db"), 16)
+            role_type = role_data.get("type", "decorative")
+
+            if role_type == "admin":
+                perms = admin_perms
+                hoist = True
+            elif role_type == "moderator":
+                perms = moderator_perms
+                hoist = True
+            elif role_type == "member":
+                perms = member_perms
+                hoist = True
+            else:
+                perms = decorative_perms
+                hoist = False
+
             role = await guild.create_role(
                 name=role_data["name"],
                 color=discord.Color(color_value),
-                mentionable=role_data.get("mentionable", True)
+                mentionable=role_data.get("mentionable", False),
+                permissions=perms,
+                hoist=hoist
             )
+            role_objects[role_data["name"]] = role
             created["roles"].append(role.id)
             await asyncio.sleep(0.5)
 
-        await progress_msg.edit(content="📁 Creating categories and channels...")
+        # Step 2 — Give creator the Admin role
+        await progress_msg.edit(content="👑 Assigning Admin role to you...")
+        admin_role = next(
+            (r for name, r in role_objects.items()
+             if template.get("roles") and
+             next((rd for rd in template["roles"] if rd["name"] == name and rd.get("type") == "admin"), None)),
+            None
+        )
+        if admin_role:
+            await ctx.author.add_roles(admin_role)
 
-        # Step 2 — Create Categories and Channels
+        # Step 3 — Create Categories and Channels
+        await progress_msg.edit(content="📁 Creating categories and channels...")
         for category_data in template.get("categories", []):
             category = await guild.create_category(category_data["name"])
             created["categories"].append(category.id)
@@ -222,27 +330,26 @@ async def confirm(ctx):
                 created["channels"].append(channel.id)
                 await asyncio.sleep(0.5)
 
-        # Step 3 — Create get-your-roles channel
+        # Step 4 — Create get-your-roles channel with only decorative roles
         await progress_msg.edit(content="🎭 Setting up roles channel...")
         roles_channel = await guild.create_text_channel(
             name=template.get("roles_channel", "get-your-roles")
         )
         created["channels"].append(roles_channel.id)
 
-        # Build roles list with actual IDs from the guild
-        created_roles = []
-        for role_data in template.get("roles", []):
-            role = discord.utils.get(guild.roles, name=role_data["name"])
-            if role:
-                created_roles.append({"name": role.name, "id": role.id})
+        decorative_roles = [
+            {"name": r["name"], "id": role_objects[r["name"]].id}
+            for r in template.get("roles", [])
+            if r.get("type") == "decorative" and r["name"] in role_objects
+        ]
 
-        view = RoleView(created_roles)
+        view = RoleView(decorative_roles)
         await roles_channel.send(
-            content="**🎭 Get Your Roles!**\n\nClick a button to get or remove a role!",
+            content="**🎭 Get Your Roles!**\n\nClick a button below to get or remove a role!",
             view=view
         )
 
-        # Step 4 — Save state for undo
+        # Step 5 — Save state for undo
         bot.last_build = created
         bot.pending_template = None
 
@@ -254,6 +361,7 @@ async def confirm(ctx):
         embed.add_field(name="🎨 Roles Created", value=str(len(created['roles'])), inline=True)
         embed.add_field(name="📁 Categories Created", value=str(len(created['categories'])), inline=True)
         embed.add_field(name="💬 Channels Created", value=str(len(created['channels'])), inline=True)
+        embed.add_field(name="👑 Your Role", value="Admin — you have full control!", inline=False)
         embed.set_footer(text="Type !undo to revert everything")
         await progress_msg.edit(content=None, embed=embed)
 
