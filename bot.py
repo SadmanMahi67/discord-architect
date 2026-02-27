@@ -860,6 +860,9 @@ async def edit(ctx, *, instruction: str):
         await progress_msg.edit(content=f"❌ Something went wrong: {str(e)}")
 
 # ── MOD LOG HELPER ───────────────────────────────────────────────────────────────────────────────
+def is_higher_role(moderator: discord.Member, target: discord.Member) -> bool:
+    return moderator.top_role > target.top_role
+
 async def log_mod_action(guild, action: str, moderator, target, reason: str = "No reason provided"):
     log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
     if not log_channel:
@@ -909,6 +912,10 @@ async def promote(ctx, member: discord.Member, *, role_type: str = "mod"):
         await ctx.send(f"❌ Couldn't find a role matching **{role_type}**. Try `mod` or `admin`.")
         return
 
+    if not is_higher_role(ctx.author, member):
+        await ctx.send("❌ You can't promote someone with an equal or higher role than you!")
+        return
+
     await member.add_roles(role)
     embed = discord.Embed(
         title="⬆️ Member Promoted!",
@@ -926,6 +933,13 @@ async def demote(ctx, member: discord.Member):
     guild = ctx.guild
     staff_roles = ["Admin", "Moderator"]
     removed = []
+
+    if not is_higher_role(ctx.author, member):
+        await ctx.send("❌ You can't demote someone with an equal or higher role than you!")
+        return
+    if member == ctx.guild.owner:
+        await ctx.send("❌ You can't demote the server owner!")
+        return
 
     for role_name in staff_roles:
         role = discord.utils.get(member.roles, name=role_name)
@@ -950,6 +964,12 @@ async def demote(ctx, member: discord.Member):
 @bot.command()
 @commands.has_permissions(kick_members=True)
 async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    if not is_higher_role(ctx.author, member):
+        await ctx.send("❌ You can't kick someone with an equal or higher role than you!")
+        return
+    if member == ctx.guild.owner:
+        await ctx.send("❌ You can't kick the server owner!")
+        return
     await member.kick(reason=reason)
     embed = discord.Embed(
         title="🥢 Member Kicked!",
@@ -965,6 +985,12 @@ async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided
 @bot.command()
 @commands.has_permissions(ban_members=True)
 async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    if not is_higher_role(ctx.author, member):
+        await ctx.send("❌ You can't ban someone with an equal or higher role than you!")
+        return
+    if member == ctx.guild.owner:
+        await ctx.send("❌ You can't ban the server owner!")
+        return
     await member.ban(reason=reason)
     embed = discord.Embed(
         title="🔨 Member Banned!",
@@ -993,6 +1019,12 @@ async def timeout(ctx, member: discord.Member, duration: str = "10m", *, reason:
         return
 
     until = discord.utils.utcnow() + datetime.timedelta(seconds=seconds)
+    if not is_higher_role(ctx.author, member):
+        await ctx.send("❌ You can't timeout someone with an equal or higher role than you!")
+        return
+    if member == ctx.guild.owner:
+        await ctx.send("❌ You can't timeout the server owner!")
+        return
     await member.timeout(until, reason=reason)
 
     embed = discord.Embed(
@@ -1023,6 +1055,9 @@ async def untimeout(ctx, member: discord.Member):
 @bot.command()
 @commands.has_permissions(kick_members=True)
 async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    if not is_higher_role(ctx.author, member):
+        await ctx.send("❌ You can't warn someone with an equal or higher role than you!")
+        return
     try:
         warn_embed = discord.Embed(
             title=f"⚠️ Warning from {ctx.guild.name}",
