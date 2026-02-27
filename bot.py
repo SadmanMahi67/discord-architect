@@ -448,7 +448,12 @@ async def confirm(ctx):
         embed.add_field(name="📁 Categories Created", value=str(len(created['categories'])), inline=True)
         embed.add_field(name="💬 Channels Created", value=str(len(created['channels'])), inline=True)
         embed.add_field(name="👑 Your Role", value="Admin — you have full control!", inline=False)
-        embed.set_footer(text="Type !undo to revert everything")
+        embed.add_field(
+            name="✏️ Want to make changes?",
+            value="Use `!edit` to modify without rebuilding!\nExamples:\n`!edit add a movie-night channel`\n`!edit rename general-chat to lobby`\n`!edit add a new category called MUSIC ZONE`",
+            inline=False
+        )
+        embed.set_footer(text="Type !undo to revert everything • !guide to see all commands")
         await progress_msg.edit(content=None, embed=embed)
 
     except Exception as e:
@@ -511,16 +516,26 @@ async def undo(ctx):
     except Exception as e:
         await progress_msg.edit(content=f"❌ Something went wrong: {str(e)}")
 
-@bot.command()
-async def help(ctx):
+@bot.command(name="guide")
+async def guide(ctx):
     embed = discord.Embed(
         title="🏗️ Architect AI — Commands",
         description="I build Discord servers from a single sentence!",
         color=discord.Color.blurple()
     )
     embed.add_field(
-        name="!setup <description>",
-        value="Describe your server and I'll generate a plan\nExample: `!setup make a gaming server for 5 friends`",
+        name="!setup",
+        value="Choose a server template to get started\nExample: `!setup` → pick a theme → `!build`",
+        inline=False
+    )
+    embed.add_field(
+        name="!details <extras>",
+        value="Add extra details after picking a template\nExample: `!details for 10 friends who play Valorant`",
+        inline=False
+    )
+    embed.add_field(
+        name="!describe <description>",
+        value="Skip templates and describe your server from scratch\nExample: `!describe a cozy anime server for 5 friends`",
         inline=False
     )
     embed.add_field(
@@ -529,13 +544,18 @@ async def help(ctx):
         inline=False
     )
     embed.add_field(
-        name="!cancel",
-        value="Scrap the current plan without building",
+        name="!edit <instruction>",
+        value="Modify your server without rebuilding everything\nExample: `!edit add a movie-night channel`\nExample: `!edit rename general-chat to lobby`\nExample: `!edit add a new category called MUSIC ZONE`",
         inline=False
     )
     embed.add_field(
         name="!undo",
-        value="Delete everything the bot just built and revert to blank",
+        value="Delete everything the bot built and revert to blank",
+        inline=False
+    )
+    embed.add_field(
+        name="!cancel",
+        value="Scrap the current plan without building",
         inline=False
     )
     embed.set_footer(text="Architect AI • Built with discord.py + Groq")
