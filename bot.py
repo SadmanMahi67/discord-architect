@@ -696,6 +696,11 @@ async def guide(ctx):
         inline=False
     )
     embed.add_field(name="📖 More Commands", value="`!modguide` — Moderation commands\n`!funguide` — Fun & misc commands", inline=False)
+    embed.add_field(
+        name="💣 !nuke",
+        value="Wipes all channels and roles so you can start fresh with !setup\nOnly the server owner can use this\nExample: `!nuke` → `!confirmnuke` or `!cancelnuke`",
+        inline=False
+    )
     embed.set_footer(text="Architect AI • Built with discord.py + Groq")
     await ctx.send(embed=embed)
 
@@ -1434,6 +1439,121 @@ async def removerole(ctx, member: discord.Member, *, role_name: str):
     )
     await ctx.send(embed=embed)
     await log_mod_action(ctx.guild, "DEMOTE", ctx.author, member, f"Manually removed role: {role.name}")
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def nuke(ctx):
+    # Only server owner can nuke
+    if ctx.author != ctx.guild.owner:
+        await ctx.send("❌ Only the server owner can use this command!")
+        return
+
+    # Confirmation step so it cant be done accidentally
+    confirm_embed = discord.Embed(
+        title="💣 NUKE SERVER",
+        description=(
+            "⚠️ **This will delete EVERYTHING:**\n\n"
+            "• All channels\n"
+            "• All categories\n"
+            "• All roles (except @everyone and bot roles)\n\n"
+            "**Members will NOT be removed.**\n\n"
+            "Type `!confirmnuke` within 30 seconds to proceed.\n"
+            "Type `!cancelnuke` to cancel."
+        ),
+        color=discord.Color.red()
+    )
+    confirm_embed.set_footer(text="This action cannot be undone!")
+    await ctx.send(embed=confirm_embed)
+    bot.nuke_pending = True
+    bot.nuke_requester = ctx.author.id
+
+    # Auto cancel after 30 seconds
+    await asyncio.sleep(30)
+    if hasattr(bot, 'nuke_pending') and bot.nuke_pending:
+        bot.nuke_pending = False
+        try:
+            await ctx.send("❌ Nuke cancelled — timed out after 30 seconds.")
+        except:
+            pass
+
+
+@bot.command()
+async def confirmnuke(ctx):
+    if not hasattr(bot, 'nuke_pending') or not bot.nuke_pending:
+        await ctx.send("❌ No nuke pending! Run `!nuke` first.")
+        return
+    if ctx.author.id != bot.nuke_requester:
+        await ctx.send("❌ Only the person who ran `!nuke` can confirm it!")
+        return
+    if ctx.author != ctx.guild.owner:
+        await ctx.send("❌ Only the server owner can nuke the server!")
+        return
+
+    bot.nuke_pending = False
+    guild = ctx.guild
+
+    progress_msg = await ctx.send("💣 Nuking server... please wait!")
+
+    try:
+        # Step 1 — Delete all channels and categories
+        await progress_msg.edit(content="💣 Deleting all channels...")
+        for channel in guild.channels:
+            try:
+                await channel.delete()
+                await asyncio.sleep(0.4)
+            except:
+                pass
+
+        # Step 2 — Delete all roles except @everyone and bot roles
+        await asyncio.sleep(1)
+        for role in guild.roles:
+            if role.name == "@everyone":
+                continue
+            if role.managed:
+                continue
+            if role == guild.me.top_role:
+                continue
+            try:
+                await role.delete()
+                await asyncio.sleep(0.4)
+            except:
+                pass
+
+        # Step 3 — Clear saved state since everything is wiped
+        bot.last_build = None
+        bot.member_role_id = None
+        save_state({"member_role_id": None})
+
+        # Step 4 — Create a fresh general channel to confirm completion
+        new_channel = await guild.create_text_channel("general")
+        await new_channel.send(
+            embed=discord.Embed(
+                title="💣 Nuke Complete!",
+                description=(
+                    "Server has been wiped clean.\n\n"
+                    "All members are still here!\n\n"
+                    "Run `!setup` to build a fresh server from scratch 🏗️"
+                ),
+                color=discord.Color.green()
+            )
+        )
+
+    except Exception as e:
+        try:
+            new_channel = await guild.create_text_channel("general")
+            await new_channel.send(f"❌ Nuke failed halfway: {str(e)}")
+        except:
+            pass
+
+
+@bot.command()
+async def cancelnuke(ctx):
+    if not hasattr(bot, 'nuke_pending') or not bot.nuke_pending:
+        await ctx.send("❌ No nuke pending!")
+        return
+    bot.nuke_pending = False
+    await ctx.send("✅ Nuke cancelled. Server is safe!")
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
