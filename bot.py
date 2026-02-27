@@ -455,16 +455,36 @@ async def confirm(ctx):
             created["roles"].append(role.id)
             await asyncio.sleep(0.5)
 
-        # Step 2 — Give creator the Admin role
-        await progress_msg.edit(content="👑 Assigning Admin role to you...")
+        # Step 2 — Give creator Admin, everyone else Member
+        await progress_msg.edit(content="👑 Assigning roles to members...")
+
         admin_role = next(
             (r for name, r in role_objects.items()
              if template.get("roles") and
              next((rd for rd in template["roles"] if rd["name"] == name and rd.get("type") == "admin"), None)),
             None
         )
+        member_role = next(
+            (r for name, r in role_objects.items()
+             if template.get("roles") and
+             next((rd for rd in template["roles"] if rd["name"] == name and rd.get("type") == "member"), None)),
+            None
+        )
+
+        # Give creator Admin
         if admin_role:
             await ctx.author.add_roles(admin_role)
+
+        # Give everyone else Member
+        if member_role:
+            for m in ctx.guild.members:
+                if m == ctx.author or m.bot:
+                    continue
+                await m.add_roles(member_role)
+                await asyncio.sleep(0.3)
+
+        # Save member role id for future joins
+        bot.member_role_id = member_role.id if member_role else None
 
         # Step 3 — Create Categories and Channels
         await progress_msg.edit(content="📁 Creating categories and channels...")
@@ -660,6 +680,15 @@ async def guide(ctx):
 
 @bot.event
 async def on_member_join(member):
+    # Auto assign member role if it exists
+    if hasattr(bot, 'member_role_id') and bot.member_role_id:
+        member_role = member.guild.get_role(bot.member_role_id)
+        if member_role:
+            try:
+                await member.add_roles(member_role)
+            except:
+                pass
+
     guild = member.guild
 
     # Find welcome channel — looks for one named welcome or general
