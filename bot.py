@@ -499,4 +499,9 @@ async def on_member_join(member):
         embed=embed
     )
 
+@bot.command()
+async def testwelcome(ctx):
+    await on_member_join(ctx.author)
+    await ctx.send("✅ Welcome message test sent!", delete_after=3)
+
 bot.run(os.getenv("DISCORD_TOKEN"))
