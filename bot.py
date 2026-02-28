@@ -1185,10 +1185,13 @@ async def edit(ctx):
         description="What would you like to do?",
         color=discord.Color.blue()
     )
-    embed.add_field(name="➕ Add Channel", value="Add a new channel to any category", inline=True)
-    embed.add_field(name="➕ Add Category", value="Create a new category", inline=True)
+    embed.add_field(name="➕ Channel", value="Add a new text or voice channel", inline=True)
+    embed.add_field(name="➕ Category", value="Create a new category", inline=True)
+    embed.add_field(name="➕ Role", value="Create a new role with AI decoration", inline=True)
     embed.add_field(name="✏️ Rename", value="Rename a channel or category", inline=True)
-    embed.add_field(name="🗑️ Delete", value="Delete a channel or category", inline=True)
+    embed.add_field(name="🗑️ Delete", value="Delete channel, category or role", inline=True)
+    embed.add_field(name="🎨 Role Color", value="Change any role's color", inline=True)
+    embed.add_field(name="📝 Edit Topic", value="Edit a channel's description", inline=True)
     await ctx.send(embed=embed, view=EditMenuView(ctx.guild))
 
 # ── MOD LOG HELPER ───────────────────────────────────────────────────────────────────────────────
@@ -1535,7 +1538,7 @@ class EditMenuView(discord.ui.View):
         super().__init__(timeout=60)
         self.guild = guild
 
-    @discord.ui.button(label="➕ Add Channel", style=discord.ButtonStyle.green, custom_id="edit_add_channel")
+    @discord.ui.button(label="➕ Channel", style=discord.ButtonStyle.green, custom_id="edit_add_channel")
     async def add_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
         options = []
         for cat in interaction.guild.categories[:25]:
@@ -1545,10 +1548,7 @@ class EditMenuView(discord.ui.View):
                 description=f"{len(cat.channels)} channels"
             ))
         if not options:
-            await interaction.response.send_message(
-                "❌ No categories found! Create a category first.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ No categories found!", ephemeral=True)
             return
         view = CategorySelectView(options, "add_channel")
         await interaction.response.send_message(
@@ -1557,9 +1557,13 @@ class EditMenuView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="➕ Add Category", style=discord.ButtonStyle.green, custom_id="edit_add_category")
+    @discord.ui.button(label="➕ Category", style=discord.ButtonStyle.green, custom_id="edit_add_category")
     async def add_category(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddCategoryModal())
+
+    @discord.ui.button(label="➕ Role", style=discord.ButtonStyle.green, custom_id="edit_add_role")
+    async def add_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddRoleModal())
 
     @discord.ui.button(label="✏️ Rename", style=discord.ButtonStyle.primary, custom_id="edit_rename")
     async def rename(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1575,6 +1579,45 @@ class EditMenuView(discord.ui.View):
         view = DeleteTypeView()
         await interaction.response.send_message(
             "🗑️ What do you want to delete?",
+            view=view,
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="🎨 Role Color", style=discord.ButtonStyle.primary, custom_id="edit_role_color")
+    async def role_color(self, interaction: discord.Interaction, button: discord.ui.Button):
+        options = []
+        for role in interaction.guild.roles:
+            if role.name == "@everyone" or role.managed:
+                continue
+            options.append(discord.SelectOption(
+                label=role.name[:100],
+                value=str(role.id)
+            ))
+        if not options:
+            await interaction.response.send_message("❌ No roles found!", ephemeral=True)
+            return
+        view = RoleColorSelectView(options[:25])
+        await interaction.response.send_message(
+            "🎨 Which role do you want to recolor?",
+            view=view,
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="📝 Edit Topic", style=discord.ButtonStyle.secondary, custom_id="edit_topic")
+    async def edit_topic(self, interaction: discord.Interaction, button: discord.ui.Button):
+        options = []
+        for channel in interaction.guild.text_channels[:25]:
+            options.append(discord.SelectOption(
+                label=channel.name[:100],
+                value=str(channel.id),
+                description=channel.topic[:50] if channel.topic else "No topic set"
+            ))
+        if not options:
+            await interaction.response.send_message("❌ No text channels found!", ephemeral=True)
+            return
+        view = TopicSelectView(options)
+        await interaction.response.send_message(
+            "📝 Which channel's topic do you want to edit?",
             view=view,
             ephemeral=True
         )
@@ -1621,11 +1664,20 @@ class AddChannelModal(discord.ui.Modal, title="➕ Add Channel"):
         default="text"
     )
 
+    channel_topic = discord.ui.TextInput(
+        label="Topic / Description (optional)",
+        placeholder="e.g. Discuss Red Dead Redemption here!",
+        required=False,
+        max_length=1024,
+        style=discord.TextStyle.paragraph
+    )
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
         guild = interaction.guild
         name = self.channel_name.value.strip()
         ch_type = self.channel_type.value.strip().lower() or "text"
+        topic = self.channel_topic.value.strip()
 
         try:
             response = groq_client.chat.completions.create(
@@ -1665,14 +1717,19 @@ class AddChannelModal(discord.ui.Modal, title="➕ Add Channel"):
             else:
                 channel = await guild.create_text_channel(
                     name=formatted_name,
-                    category=self.category
+                    category=self.category,
+                    topic=topic if topic else None
                 )
 
             embed = discord.Embed(
                 title="✅ Channel Created!",
-                description=f"Created **{channel.name}** in **{self.category.name}**",
                 color=discord.Color.green()
             )
+            embed.add_field(name="Name", value=channel.name, inline=True)
+            embed.add_field(name="Category", value=self.category.name, inline=True)
+            embed.add_field(name="Type", value="🔊 Voice" if ch_type == "voice" else "💬 Text", inline=True)
+            if topic:
+                embed.add_field(name="Topic", value=topic, inline=False)
             await interaction.followup.send(embed=embed)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}")
@@ -1907,6 +1964,25 @@ class DeleteTypeView(discord.ui.View):
             view=view
         )
 
+    @discord.ui.button(label="🎭 Delete Role", style=discord.ButtonStyle.red, custom_id="delete_role_btn")
+    async def delete_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        options = []
+        for role in interaction.guild.roles:
+            if role.name == "@everyone" or role.managed:
+                continue
+            options.append(discord.SelectOption(
+                label=role.name[:100],
+                value=str(role.id)
+            ))
+        if not options:
+            await interaction.response.send_message("❌ No deletable roles found!", ephemeral=True)
+            return
+        view = RoleDeleteSelectView(options[:25])
+        await interaction.response.edit_message(
+            content="🎭 Which role do you want to delete?",
+            view=view
+        )
+
 
 class ChannelDeleteSelectView(discord.ui.View):
     def __init__(self, options: list):
@@ -1956,6 +2032,232 @@ class CategoryDeleteSelectView(discord.ui.View):
             color=discord.Color.red()
         )
         await interaction.response.edit_message(content=None, embed=embed, view=None)
+
+
+class RoleDeleteSelectView(discord.ui.View):
+    def __init__(self, options: list):
+        super().__init__(timeout=60)
+        select = discord.ui.Select(
+            placeholder="Choose a role to delete...",
+            options=options,
+            custom_id="role_delete_select"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        role_id = int(interaction.data["values"][0])
+        role = interaction.guild.get_role(role_id)
+        name = role.name
+        try:
+            await role.delete()
+            embed = discord.Embed(
+                title="🗑️ Role Deleted!",
+                description=f"Deleted role **{name}**",
+                color=discord.Color.red()
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=None)
+        except Exception as e:
+            await interaction.response.edit_message(content=f"❌ Error: {str(e)}", view=None)
+
+
+class AddRoleModal(discord.ui.Modal, title="➕ Add Role"):
+    role_name = discord.ui.TextInput(
+        label="Role Name",
+        placeholder="e.g. Artist, Musician, Night Owl...",
+        required=True,
+        max_length=100
+    )
+
+    role_color = discord.ui.TextInput(
+        label="Color (hex code or color name)",
+        placeholder="e.g. #FF5733 or red, blue, gold...",
+        required=False,
+        max_length=20,
+        default="random"
+    )
+
+    role_type = discord.ui.TextInput(
+        label="Show separately in member list? (yes/no)",
+        placeholder="yes",
+        required=False,
+        max_length=3,
+        default="yes"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        guild = interaction.guild
+        name = self.role_name.value.strip()
+        color_input = self.role_color.value.strip().lower()
+        hoist = self.role_type.value.strip().lower() != "no"
+
+        color_map = {
+            "red": 0xFF0000, "blue": 0x0000FF, "green": 0x00FF00,
+            "gold": 0xFFD700, "orange": 0xFF8C00, "purple": 0x8B008B,
+            "pink": 0xFF69B4, "white": 0xFFFFFF, "black": 0x000000,
+            "yellow": 0xFFFF00, "cyan": 0x00FFFF, "teal": 0x008080
+        }
+
+        try:
+            if color_input == "random" or not color_input:
+                import random
+                role_color = discord.Color(random.randint(0x100000, 0xFFFFFF))
+            elif color_input in color_map:
+                role_color = discord.Color(color_map[color_input])
+            elif color_input.startswith("#"):
+                role_color = discord.Color(int(color_input[1:], 16))
+            else:
+                role_color = discord.Color.default()
+        except:
+            role_color = discord.Color.default()
+
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a Discord role name formatter. "
+                            "Given a role name, add a fitting emoji prefix. "
+                            "Examples: Night Owl → 🦉 Night Owl, Artist → 🎨 Artist, Gamer → 🎮 Gamer. "
+                            "Return ONLY the formatted role name, nothing else."
+                        )
+                    },
+                    {"role": "user", "content": f"Role name: {name}"}
+                ]
+            )
+            formatted_name = response.choices[0].message.content.strip().strip('"')
+        except:
+            formatted_name = name
+
+        try:
+            role = await guild.create_role(
+                name=formatted_name,
+                color=role_color,
+                hoist=hoist,
+                mentionable=True
+            )
+            embed = discord.Embed(
+                title="✅ Role Created!",
+                color=role_color
+            )
+            embed.add_field(name="Name", value=role.name, inline=True)
+            embed.add_field(name="Color", value=str(role_color), inline=True)
+            embed.add_field(name="Shown Separately", value="Yes" if hoist else "No", inline=True)
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}")
+
+
+class RoleColorSelectView(discord.ui.View):
+    def __init__(self, options: list):
+        super().__init__(timeout=60)
+        select = discord.ui.Select(
+            placeholder="Choose a role...",
+            options=options,
+            custom_id="role_color_select"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        role_id = int(interaction.data["values"][0])
+        role = interaction.guild.get_role(role_id)
+        await interaction.response.send_modal(RoleColorModal(role))
+
+
+class RoleColorModal(discord.ui.Modal, title="🎨 Change Role Color"):
+    def __init__(self, role: discord.Role):
+        super().__init__()
+        self.role = role
+
+    new_color = discord.ui.TextInput(
+        label="New Color (hex or color name)",
+        placeholder="e.g. #FF5733 or red, blue, gold...",
+        required=True,
+        max_length=20
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        color_input = self.new_color.value.strip().lower()
+
+        color_map = {
+            "red": 0xFF0000, "blue": 0x0000FF, "green": 0x00FF00,
+            "gold": 0xFFD700, "orange": 0xFF8C00, "purple": 0x8B008B,
+            "pink": 0xFF69B4, "white": 0xFFFFFF, "black": 0x000000,
+            "yellow": 0xFFFF00, "cyan": 0x00FFFF, "teal": 0x008080
+        }
+
+        try:
+            if color_input in color_map:
+                new_color = discord.Color(color_map[color_input])
+            elif color_input.startswith("#"):
+                new_color = discord.Color(int(color_input[1:], 16))
+            else:
+                await interaction.followup.send("❌ Invalid color! Use hex like `#FF5733` or a name like `red`")
+                return
+        except:
+            await interaction.followup.send("❌ Invalid color format!")
+            return
+
+        try:
+            await self.role.edit(color=new_color)
+            embed = discord.Embed(
+                title="🎨 Role Color Updated!",
+                description=f"**{self.role.name}** is now colored!",
+                color=new_color
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}")
+
+
+class TopicSelectView(discord.ui.View):
+    def __init__(self, options: list):
+        super().__init__(timeout=60)
+        select = discord.ui.Select(
+            placeholder="Choose a channel...",
+            options=options,
+            custom_id="topic_select"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        channel_id = int(interaction.data["values"][0])
+        channel = interaction.guild.get_channel(channel_id)
+        await interaction.response.send_modal(EditTopicModal(channel))
+
+
+class EditTopicModal(discord.ui.Modal, title="📝 Edit Channel Topic"):
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__()
+        self.channel = channel
+
+    new_topic = discord.ui.TextInput(
+        label="New Topic / Description",
+        placeholder="e.g. Discuss your favorite games here!",
+        required=True,
+        max_length=1024,
+        style=discord.TextStyle.paragraph
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            await self.channel.edit(topic=self.new_topic.value.strip())
+            embed = discord.Embed(
+                title="📝 Topic Updated!",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Channel", value=self.channel.name, inline=True)
+            embed.add_field(name="New Topic", value=self.new_topic.value.strip(), inline=False)
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}")
 
 
 # ── GUIDE COMMANDS ────────────────────────────────────────────────────────────────────────────
