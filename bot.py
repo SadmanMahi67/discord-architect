@@ -12,8 +12,14 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 import math
 import aiohttp
+import motor.motor_asyncio
 
 load_dotenv()
+
+# MongoDB setup
+mongo_client = motor.motor_asyncio.AsyncIOMotorClient(os.getenv("MONGODB_URL"))
+db = mongo_client["architectai"]
+guilds_col = db["guilds"]
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
@@ -36,6 +42,24 @@ def save_state(data: dict):
     current.update(data)
     with open(STATE_FILE, "w") as f:
         json.dump(current, f, indent=2)
+
+async def db_save(guild_id: str, data: dict):
+    try:
+        await guilds_col.update_one(
+            {"guild_id": guild_id},
+            {"$set": data},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"⚠️ DB save error: {e}")
+
+async def db_load(guild_id: str) -> dict:
+    try:
+        result = await guilds_col.find_one({"guild_id": guild_id})
+        return result or {}
+    except Exception as e:
+        print(f"⚠️ DB load error: {e}")
+        return {}
 
 LEVELS_FILE = "levels.json"
 
@@ -305,17 +329,10 @@ async def on_ready():
     # Initialize cooldowns first before anything else
     bot.xp_cooldowns = {}
 
-    # Load saved role data first
     state = load_state()
-    saved_decorative = state.get("decorative_roles", [])
-    saved_color = state.get("color_roles", [])
-    bot.decorative_roles = saved_decorative
-    bot.color_roles = saved_color
 
     # Register views safely one by one
     views_to_register = [
-        RoleView(saved_decorative, []),
-        RoleView([], saved_color),
         TemplateView(),
         TicketOpenView(),
         TicketCloseView(),
@@ -343,6 +360,25 @@ async def on_ready():
 
     auto_update_stats.start()
     print("✅ All systems ready!")
+
+@bot.event
+async def on_guild_available(guild):
+    try:
+        data = await db_load(str(guild.id))
+        decorative_roles = data.get("decorative_roles", [])
+        color_roles = data.get("color_roles", [])
+
+        if decorative_roles or color_roles:
+            bot.add_view(RoleView(decorative_roles, []))
+            bot.add_view(RoleView([], color_roles))
+            print(f"✅ Loaded role views for {guild.name}")
+
+        member_role_id = data.get("member_role_id")
+        if member_role_id:
+            bot.member_role_id = member_role_id
+
+    except Exception as e:
+        print(f"⚠️ Could not load data for {guild.name}: {e}")
 
 @bot.command()
 async def hello(ctx):
@@ -648,10 +684,11 @@ async def confirm(ctx):
             view=color_view
         )
 
-        # Save role data to state.json so buttons survive restarts
-        save_state({
+        # Save role data to MongoDB so buttons survive restarts
+        await db_save(str(ctx.guild.id), {
             "decorative_roles": decorative_roles,
-            "color_roles": color_roles
+            "color_roles": color_roles,
+            "member_role_id": member_role.id if member_role else None
         })
         bot.decorative_roles = decorative_roles
         bot.color_roles = color_roles
@@ -660,6 +697,15 @@ async def confirm(ctx):
         bot.last_build = created
         bot.last_template = template
         bot.pending_template = None
+        # Save last build to MongoDB
+        await db_save(str(ctx.guild.id), {
+            "last_build": {
+                "roles": created["roles"],
+                "categories": created["categories"],
+                "channels": created["channels"]
+            },
+            "last_template": template
+        })
 
         embed = discord.Embed(
             title="✅ Server Built Successfully!",
@@ -684,8 +730,13 @@ async def confirm(ctx):
 @bot.command()
 async def undo(ctx):
     if not hasattr(bot, 'last_build') or bot.last_build is None:
-        await ctx.send("❌ Nothing to undo! Build a server first with `!setup`.")
-        return
+        # Try loading from MongoDB if not in memory
+        data = await db_load(str(ctx.guild.id))
+        if data.get("last_build"):
+            bot.last_build = data["last_build"]
+        else:
+            await ctx.send("❌ Nothing to undo!")
+            return
 
     progress_msg = await ctx.send("🗑️ Undoing everything... please wait!")
     guild = ctx.guild
@@ -2484,24 +2535,21 @@ async def before_stats():
 @commands.has_permissions(administrator=True)
 async def refreshroles(ctx):
     guild = ctx.guild
-    state = load_state()
-    decorative_roles = state.get("decorative_roles", [])
-    color_roles = state.get("color_roles", [])
+    data = await db_load(str(guild.id))
+    decorative_roles = data.get("decorative_roles", [])
+    color_roles = data.get("color_roles", [])
 
     if not decorative_roles and not color_roles:
         await ctx.send("❌ No saved role data found! Run `!setup` and `!confirm` first.")
         return
 
-    # Find the roles channel
     roles_channel = discord.utils.get(guild.text_channels, name="get-your-roles")
     if not roles_channel:
         await ctx.send("❌ Couldn't find #get-your-roles channel!")
         return
 
-    # Delete old messages
     await roles_channel.purge(limit=10)
 
-    # Repost with fresh views
     identity_view = RoleView(decorative_roles, [])
     await roles_channel.send(
         content=(
