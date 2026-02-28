@@ -13,6 +13,7 @@ import io
 import math
 import aiohttp
 import motor.motor_asyncio
+from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -1541,6 +1542,21 @@ async def funguide(ctx):
         value="Gets an AI-generated conversation starter\nExample: `!topic`",
         inline=False
     )
+    embed.add_field(
+        name="🎉 !giveaway <duration> <winners> <prize>",
+        value="Starts a giveaway\nExample: `!giveaway 1h 1 Steam Key`\nExample: `!giveaway 30m 2 Nitro`",
+        inline=False
+    )
+    embed.add_field(
+        name="🎲 !greroll <message_id>",
+        value="Rerolls a giveaway winner\nExample: `!greroll 123456789`",
+        inline=False
+    )
+    embed.add_field(
+        name="⏹️ !gend <message_id>",
+        value="Ends a giveaway early\nExample: `!gend 123456789`",
+        inline=False
+    )
     embed.set_footer(text="Use !guide for setup commands • !modguide for mod commands")
     await ctx.send(embed=embed)
 
@@ -2570,6 +2586,273 @@ async def refreshroles(ctx):
     )
 
     await ctx.send("✅ Role buttons refreshed!", delete_after=3)
+
+
+# ── GIVEAWAY SYSTEM ────────────────────────────────────────────────────────────────
+
+class GiveawayView(discord.ui.View):
+    def __init__(self, giveaway_id: str):
+        super().__init__(timeout=None)
+        self.giveaway_id = giveaway_id
+
+    @discord.ui.button(
+        label="🎉 Enter Giveaway",
+        style=discord.ButtonStyle.green,
+        custom_id="enter_giveaway"
+    )
+    async def enter_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            guild_id = str(interaction.guild.id)
+            user_id = str(interaction.user.id)
+
+            data = await db_load(guild_id)
+            giveaways = data.get("giveaways", {})
+
+            if self.giveaway_id not in giveaways:
+                await interaction.response.send_message(
+                    "❌ This giveaway no longer exists!",
+                    ephemeral=True
+                )
+                return
+
+            giveaway = giveaways[self.giveaway_id]
+
+            if giveaway.get("ended"):
+                await interaction.response.send_message(
+                    "❌ This giveaway has already ended!",
+                    ephemeral=True
+                )
+                return
+
+            entries = giveaway.get("entries", [])
+
+            if user_id in entries:
+                entries.remove(user_id)
+                giveaways[self.giveaway_id]["entries"] = entries
+                await db_save(guild_id, {"giveaways": giveaways})
+                await interaction.response.send_message(
+                    "✅ You left the giveaway!",
+                    ephemeral=True
+                )
+            else:
+                entries.append(user_id)
+                giveaways[self.giveaway_id]["entries"] = entries
+                await db_save(guild_id, {"giveaways": giveaways})
+                await interaction.response.send_message(
+                    f"🎉 You entered the giveaway! Good luck!\n"
+                    f"Total entries: **{len(entries)}**",
+                    ephemeral=True
+                )
+
+            # Update the embed entry count
+            channel = interaction.channel
+            try:
+                msg = await channel.fetch_message(int(self.giveaway_id))
+                embed = msg.embeds[0]
+                for i, field in enumerate(embed.fields):
+                    if "Entries" in field.name:
+                        embed.set_field_at(i, name="👥 Entries", value=str(len(entries)), inline=True)
+                        break
+                await msg.edit(embed=embed)
+            except:
+                pass
+
+        except Exception as e:
+            try:
+                await interaction.response.send_message(
+                    f"❌ Error: {str(e)}", ephemeral=True
+                )
+            except:
+                pass
+
+
+def parse_duration(duration: str) -> int:
+    time_units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    unit = duration[-1].lower()
+    if unit not in time_units or not duration[:-1].isdigit():
+        return None
+    return int(duration[:-1]) * time_units[unit]
+
+
+async def end_giveaway(guild_id: str, message_id: str, channel_id: str, winners_count: int):
+    try:
+        data = await db_load(guild_id)
+        giveaways = data.get("giveaways", {})
+
+        if message_id not in giveaways:
+            return
+
+        giveaway = giveaways[message_id]
+        if giveaway.get("ended"):
+            return
+
+        giveaway["ended"] = True
+        await db_save(guild_id, {"giveaways": giveaways})
+
+        guild = bot.get_guild(int(guild_id))
+        if not guild:
+            return
+
+        channel = guild.get_channel(int(channel_id))
+        if not channel:
+            return
+
+        try:
+            msg = await channel.fetch_message(int(message_id))
+        except:
+            return
+
+        entries = giveaway.get("entries", [])
+        prize = giveaway.get("prize", "Unknown Prize")
+
+        if not entries:
+            embed = discord.Embed(
+                title="🎉 Giveaway Ended — No Winner",
+                description=f"**Prize:** {prize}\n\nNo one entered the giveaway!",
+                color=discord.Color.red()
+            )
+            await msg.edit(embed=embed, view=None)
+            await channel.send("😢 The giveaway ended with no entries!")
+            return
+
+        actual_winners = min(winners_count, len(entries))
+        winner_ids = random.sample(entries, actual_winners)
+        winners = []
+        for wid in winner_ids:
+            member = guild.get_member(int(wid))
+            if member:
+                winners.append(member)
+
+        winner_mentions = ", ".join([w.mention for w in winners])
+
+        embed = discord.Embed(
+            title="🎉 Giveaway Ended!",
+            description=f"**Prize:** {prize}",
+            color=discord.Color.gold()
+        )
+        embed.add_field(name="🏆 Winner(s)", value=winner_mentions, inline=False)
+        embed.add_field(name="👥 Total Entries", value=str(len(entries)), inline=True)
+        embed.set_footer(text="Giveaway ended")
+        await msg.edit(embed=embed, view=None)
+
+        await channel.send(
+            f"🎉 Congratulations {winner_mentions}! "
+            f"You won **{prize}**!"
+        )
+
+    except Exception as e:
+        print(f"⚠️ Giveaway end error: {e}")
+
+
+@bot.command()
+@commands.has_permissions(manage_guild=True)
+async def giveaway(ctx, duration: str, winners: int, *, prize: str):
+    seconds = parse_duration(duration)
+    if not seconds:
+        await ctx.send(
+            "❌ Invalid duration! Use formats like `30s` `10m` `2h` `1d`\n"
+            "Example: `!giveaway 1h 1 Steam Key`"
+        )
+        return
+
+    if winners < 1 or winners > 20:
+        await ctx.send("❌ Winners must be between 1 and 20!")
+        return
+
+    if seconds < 10:
+        await ctx.send("❌ Giveaway must be at least 10 seconds long!")
+        return
+
+    end_time = int(discord.utils.utcnow().timestamp()) + seconds
+
+    embed = discord.Embed(
+        title=f"🎉 GIVEAWAY — {prize}",
+        description=(
+            f"Click the button below to enter!\n"
+            f"Click again to leave the giveaway.\n\n"
+            f"⏰ **Ends:** <t:{end_time}:R>"
+        ),
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="🏆 Winners", value=str(winners), inline=True)
+    embed.add_field(name="👥 Entries", value="0", inline=True)
+    embed.add_field(name="🎁 Prize", value=prize, inline=True)
+    embed.set_footer(text=f"Hosted by {ctx.author.name}")
+
+    giveaway_msg = await ctx.send(embed=embed)
+
+    view = GiveawayView(str(giveaway_msg.id))
+    await giveaway_msg.edit(view=view)
+
+    guild_id = str(ctx.guild.id)
+    data = await db_load(guild_id)
+    giveaways = data.get("giveaways", {})
+    giveaways[str(giveaway_msg.id)] = {
+        "prize": prize,
+        "winners": winners,
+        "entries": [],
+        "ended": False,
+        "channel_id": str(ctx.channel.id),
+        "host": str(ctx.author.id),
+        "end_time": end_time
+    }
+    await db_save(guild_id, {"giveaways": giveaways})
+
+    await ctx.message.delete()
+
+    async def schedule_end():
+        await asyncio.sleep(seconds)
+        await end_giveaway(
+            str(ctx.guild.id),
+            str(giveaway_msg.id),
+            str(ctx.channel.id),
+            winners
+        )
+
+    asyncio.create_task(schedule_end())
+
+
+@bot.command()
+@commands.has_permissions(manage_guild=True)
+async def gend(ctx, message_id: str):
+    await end_giveaway(
+        str(ctx.guild.id),
+        message_id,
+        str(ctx.channel.id),
+        1
+    )
+    await ctx.send("✅ Giveaway ended early!", delete_after=3)
+
+
+@bot.command()
+@commands.has_permissions(manage_guild=True)
+async def greroll(ctx, message_id: str):
+    guild_id = str(ctx.guild.id)
+    data = await db_load(guild_id)
+    giveaways = data.get("giveaways", {})
+
+    if message_id not in giveaways:
+        await ctx.send("❌ Giveaway not found!")
+        return
+
+    giveaway = giveaways[message_id]
+    entries = giveaway.get("entries", [])
+
+    if not entries:
+        await ctx.send("❌ No entries to reroll from!")
+        return
+
+    winner_id = random.choice(entries)
+    member = ctx.guild.get_member(int(winner_id))
+
+    if not member:
+        await ctx.send("❌ Could not find the winner in the server!")
+        return
+
+    await ctx.send(
+        f"🎉 New winner: {member.mention}! "
+        f"Congratulations on winning **{giveaway.get('prize', 'the prize')}**!"
+    )
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
