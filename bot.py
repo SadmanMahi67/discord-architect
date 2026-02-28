@@ -62,6 +62,55 @@ async def db_load(guild_id: str) -> dict:
         print(f"⚠️ DB load error: {e}")
         return {}
 
+async def automod_warn(guild: discord.Guild, member: discord.Member, reason: str):
+    guild_id = str(guild.id)
+    user_id = str(member.id)
+
+    data = await db_load(guild_id)
+    automod_warns = data.get("automod_warns", {})
+    config = data.get("automod", {})
+    threshold = config.get("warn_threshold", 3)
+
+    if user_id not in automod_warns:
+        automod_warns[user_id] = 0
+    automod_warns[user_id] += 1
+    warn_count = automod_warns[user_id]
+
+    await db_save(guild_id, {"automod_warns": automod_warns})
+
+    log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
+    if not log_channel:
+        log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+    if log_channel:
+        embed = discord.Embed(
+            title="🛡️ Auto-Mod Action",
+            color=discord.Color.orange(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="User", value=f"{member.mention} ({member.name})", inline=True)
+        embed.add_field(name="Reason", value=reason, inline=True)
+        embed.add_field(name="Warning Count", value=f"{warn_count}/{threshold}", inline=True)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await log_channel.send(embed=embed)
+
+    if warn_count >= threshold:
+        automod_warns[user_id] = 0
+        await db_save(guild_id, {"automod_warns": automod_warns})
+        try:
+            until = discord.utils.utcnow() + datetime.timedelta(minutes=10)
+            await member.timeout(until, reason=f"Auto-mod: {warn_count} violations")
+            if log_channel:
+                await log_channel.send(
+                    embed=discord.Embed(
+                        title="⏱️ Auto-Mod Timeout",
+                        description=f"{member.mention} was timed out for 10 minutes after {warn_count} violations!",
+                        color=discord.Color.red(),
+                        timestamp=discord.utils.utcnow()
+                    )
+                )
+        except:
+            pass
+
 LEVELS_FILE = "levels.json"
 
 def load_levels() -> dict:
@@ -234,6 +283,13 @@ Rules:
   {"name": "🍑 Peach", "color": "0xFFCBA4", "type": "color"},
   {"name": "🤍 White", "color": "0xFFFAFA", "type": "color"}
 """
+
+BLOCKED_WORDS = [
+    "nigger", "nigga", "faggot", "fag", "retard", "retarded",
+    "chink", "spic", "kike", "tranny", "dyke", "cunt",
+    "wetback", "raghead", "sandnigger", "gook", "beaner",
+    "cracker", "whitey", "towelhead", "zipperhead"
+]
 
 def extract_json(text):
     """Extract JSON even if the LLM adds extra text around it"""
@@ -520,6 +576,7 @@ async def on_ready():
 
     # Initialize cooldowns first before anything else
     bot.xp_cooldowns = {}
+    bot.spam_tracker = {}
 
     state = load_state()
 
@@ -2336,6 +2393,7 @@ class GuideView(discord.ui.View):
         embed.add_field(name="!untimeout @user", value="Remove a timeout", inline=False)
         embed.add_field(name="!warn @user reason", value="Warn a member via DM", inline=False)
         embed.add_field(name="!addrole / !removerole", value="Manually add or remove roles", inline=False)
+        embed.add_field(name="!automod", value="Open the auto-mod control panel\nConfigure spam, caps, links, banned words and more", inline=False)
         embed.set_footer(text="All actions logged in #mod-logs • !guide for main menu")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -3049,6 +3107,87 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
+    # ── AUTO-MOD ────────────────────────────────────────────────────
+    guild_id = str(message.guild.id)
+    data = await db_load(guild_id)
+    config = data.get("automod", {})
+
+    if config.get("enabled") and not message.author.guild_permissions.kick_members:
+        content = message.content
+        member = message.author
+        flagged = False
+        flag_reason = ""
+
+        # 1. Spam detection — 5 messages in 5 seconds
+        if config.get("block_spam", True):
+            spam_key = f"{guild_id}_{member.id}"
+            now = asyncio.get_event_loop().time()
+            if spam_key not in bot.spam_tracker:
+                bot.spam_tracker[spam_key] = []
+            bot.spam_tracker[spam_key].append(now)
+            bot.spam_tracker[spam_key] = [
+                t for t in bot.spam_tracker[spam_key] if now - t < 5
+            ]
+            if len(bot.spam_tracker[spam_key]) >= 5:
+                flagged = True
+                flag_reason = "Spam detected"
+                bot.spam_tracker[spam_key] = []
+
+        # 2. Caps spam — 80%+ caps in messages over 8 chars
+        if not flagged and config.get("block_caps", True):
+            if len(content) > 8:
+                caps_ratio = sum(1 for c in content if c.isupper()) / len(content)
+                if caps_ratio > 0.8:
+                    flagged = True
+                    flag_reason = "Excessive caps"
+
+        # 3. Link detection
+        if not flagged and config.get("block_links", False):
+            import re as _re
+            url_pattern = _re.compile(r'https?://\S+|www\.\S+|discord\.gg/\S+')
+            if url_pattern.search(content):
+                flagged = True
+                flag_reason = "Links not allowed"
+
+        # 4. Mass mentions — 5+ pings in one message
+        if not flagged and config.get("block_mentions", True):
+            if len(message.mentions) >= 5 or message.mention_everyone:
+                flagged = True
+                flag_reason = "Mass mentions"
+
+        # 5. Built-in slur list (always active when automod is on)
+        if not flagged:
+            content_lower = content.lower()
+            for word in BLOCKED_WORDS:
+                if word in content_lower:
+                    flagged = True
+                    flag_reason = "Slur detected"
+                    break
+
+        # 6. Custom banned words
+        if not flagged:
+            banned_words = config.get("banned_words", [])
+            content_lower = content.lower()
+            for word in banned_words:
+                if word in content_lower:
+                    flagged = True
+                    flag_reason = "Banned word"
+                    break
+
+        if flagged:
+            try:
+                await message.delete()
+                await message.channel.send(
+                    f"⚠️ {member.mention} — {flag_reason}!",
+                    delete_after=5
+                )
+                await automod_warn(message.guild, member, flag_reason)
+            except:
+                pass
+            await bot.process_commands(message)
+            return
+    # ── END AUTO-MOD ──────────────────────────────────────────────────
+
     guild_id = str(message.guild.id)
     user_id = str(message.author.id)
 
@@ -3671,6 +3810,246 @@ async def guide(ctx):
     embed.add_field(name="🎮 Fun & Levels", value="XP, giveaways, games", inline=True)
     embed.set_footer(text="Architect AI • Built with discord.py + Groq")
     await ctx.send(embed=embed, view=GuideView())
+
+
+class AutoModMenuView(discord.ui.View):
+    def __init__(self, config: dict):
+        super().__init__(timeout=60)
+        self.config = config
+
+    @discord.ui.button(label="⚙️ Configure", style=discord.ButtonStyle.primary, custom_id="automod_configure")
+    async def configure(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AutoModConfigModal(self.config))
+
+    @discord.ui.button(label="✅ Enable", style=discord.ButtonStyle.green, custom_id="automod_enable")
+    async def enable(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = str(interaction.guild.id)
+        data = await db_load(guild_id)
+        config = data.get("automod", self.config)
+        config["enabled"] = True
+        await db_save(guild_id, {"automod": config})
+        embed = discord.Embed(
+            title="🛡️ Auto-Mod Enabled!",
+            description="Auto-mod is now active and watching messages.",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+    @discord.ui.button(label="❌ Disable", style=discord.ButtonStyle.red, custom_id="automod_disable")
+    async def disable(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = str(interaction.guild.id)
+        data = await db_load(guild_id)
+        config = data.get("automod", self.config)
+        config["enabled"] = False
+        await db_save(guild_id, {"automod": config})
+        embed = discord.Embed(
+            title="🛡️ Auto-Mod Disabled!",
+            description="Auto-mod has been turned off.",
+            color=discord.Color.red()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+    @discord.ui.button(label="➕ Add Banned Word", style=discord.ButtonStyle.secondary, custom_id="automod_addword")
+    async def add_word(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddBannedWordModal())
+
+    @discord.ui.button(label="🗑️ Remove Banned Word", style=discord.ButtonStyle.secondary, custom_id="automod_removeword")
+    async def remove_word(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = str(interaction.guild.id)
+        data = await db_load(guild_id)
+        config = data.get("automod", {})
+        banned = config.get("banned_words", [])
+        if not banned:
+            await interaction.response.send_message(
+                "❌ No custom banned words yet! Add some first.",
+                ephemeral=True
+            )
+            return
+        options = [
+            discord.SelectOption(label=word, value=word)
+            for word in banned[:25]
+        ]
+        view = RemoveBannedWordView(options)
+        await interaction.response.send_message(
+            "🗑️ Which word do you want to remove?",
+            view=view,
+            ephemeral=True
+        )
+
+
+class AutoModConfigModal(discord.ui.Modal, title="⚙️ Configure Auto-Mod"):
+    def __init__(self, config: dict):
+        super().__init__()
+        self.config = config
+
+    block_spam = discord.ui.TextInput(
+        label="Block Spam? (yes/no)",
+        placeholder="yes",
+        required=False,
+        max_length=3,
+        default="yes"
+    )
+
+    block_caps = discord.ui.TextInput(
+        label="Block Caps Spam? (yes/no)",
+        placeholder="yes",
+        required=False,
+        max_length=3,
+        default="yes"
+    )
+
+    block_links = discord.ui.TextInput(
+        label="Block Links? (yes/no)",
+        placeholder="no",
+        required=False,
+        max_length=3,
+        default="no"
+    )
+
+    block_mentions = discord.ui.TextInput(
+        label="Block Mass Mentions? (yes/no)",
+        placeholder="yes",
+        required=False,
+        max_length=3,
+        default="yes"
+    )
+
+    warn_threshold = discord.ui.TextInput(
+        label="Warnings before timeout (1-10)",
+        placeholder="3",
+        required=False,
+        max_length=2,
+        default="3"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        guild_id = str(interaction.guild.id)
+        data = await db_load(guild_id)
+        config = data.get("automod", self.config)
+
+        config["block_spam"] = self.block_spam.value.strip().lower() != "no"
+        config["block_caps"] = self.block_caps.value.strip().lower() != "no"
+        config["block_links"] = self.block_links.value.strip().lower() == "yes"
+        config["block_mentions"] = self.block_mentions.value.strip().lower() != "no"
+
+        try:
+            threshold = int(self.warn_threshold.value.strip())
+            config["warn_threshold"] = max(1, min(10, threshold))
+        except:
+            config["warn_threshold"] = 3
+
+        await db_save(guild_id, {"automod": config})
+
+        embed = discord.Embed(
+            title="✅ Auto-Mod Configured!",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Anti-Spam", value="✅" if config["block_spam"] else "❌", inline=True)
+        embed.add_field(name="Anti-Caps", value="✅" if config["block_caps"] else "❌", inline=True)
+        embed.add_field(name="Anti-Links", value="✅" if config["block_links"] else "❌", inline=True)
+        embed.add_field(name="Anti-Mentions", value="✅" if config["block_mentions"] else "❌", inline=True)
+        embed.add_field(name="Warn Threshold", value=str(config["warn_threshold"]), inline=True)
+        await interaction.followup.send(embed=embed)
+
+
+class AddBannedWordModal(discord.ui.Modal, title="➕ Add Banned Word"):
+    word = discord.ui.TextInput(
+        label="Word to ban",
+        placeholder="Enter the word...",
+        required=True,
+        max_length=50
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        guild_id = str(interaction.guild.id)
+        data = await db_load(guild_id)
+        config = data.get("automod", {})
+        banned = config.get("banned_words", [])
+        word = self.word.value.strip().lower()
+
+        if word in banned:
+            await interaction.followup.send(
+                f"❌ **{word}** is already banned!",
+                ephemeral=True
+            )
+            return
+
+        banned.append(word)
+        config["banned_words"] = banned
+        await db_save(guild_id, {"automod": config})
+        await interaction.followup.send(
+            f"✅ Added **{word}** to banned words! ({len(banned)} total)",
+            ephemeral=True
+        )
+
+
+class RemoveBannedWordView(discord.ui.View):
+    def __init__(self, options: list):
+        super().__init__(timeout=60)
+        select = discord.ui.Select(
+            placeholder="Choose a word to remove...",
+            options=options,
+            custom_id="remove_word_select"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        word = interaction.data["values"][0]
+        guild_id = str(interaction.guild.id)
+        data = await db_load(guild_id)
+        config = data.get("automod", {})
+        banned = config.get("banned_words", [])
+
+        if word in banned:
+            banned.remove(word)
+            config["banned_words"] = banned
+            await db_save(guild_id, {"automod": config})
+            await interaction.response.edit_message(
+                content=f"✅ Removed **{word}** from banned words!",
+                view=None
+            )
+        else:
+            await interaction.response.edit_message(
+                content=f"❌ Word not found!",
+                view=None
+            )
+
+
+@bot.command()
+@staff_only()
+async def automod(ctx):
+    guild_id = str(ctx.guild.id)
+    data = await db_load(guild_id)
+    config = data.get("automod", {
+        "enabled": False,
+        "block_links": False,
+        "block_caps": True,
+        "block_spam": True,
+        "block_mentions": True,
+        "warn_threshold": 3,
+        "banned_words": []
+    })
+
+    status = "✅ Enabled" if config.get("enabled") else "❌ Disabled"
+    banned_count = len(config.get("banned_words", []))
+
+    embed = discord.Embed(
+        title="🛡️ Auto-Mod",
+        description=f"**Status:** {status}",
+        color=discord.Color.green() if config.get("enabled") else discord.Color.red()
+    )
+    embed.add_field(name="🚫 Anti-Spam", value="✅" if config.get("block_spam", True) else "❌", inline=True)
+    embed.add_field(name="🔠 Anti-Caps", value="✅" if config.get("block_caps", True) else "❌", inline=True)
+    embed.add_field(name="🔗 Anti-Links", value="✅" if config.get("block_links", False) else "❌", inline=True)
+    embed.add_field(name="📢 Anti-Mentions", value="✅" if config.get("block_mentions", True) else "❌", inline=True)
+    embed.add_field(name="🤬 Slur Filter", value="✅ Always On", inline=True)
+    embed.add_field(name="⚠️ Warn Threshold", value=str(config.get("warn_threshold", 3)), inline=True)
+    embed.add_field(name="📝 Custom Banned Words", value=str(banned_count), inline=True)
+    embed.set_footer(text="Use the buttons below to configure")
+    await ctx.send(embed=embed, view=AutoModMenuView(config))
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
