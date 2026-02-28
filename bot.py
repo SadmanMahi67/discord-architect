@@ -1178,124 +1178,18 @@ Rules:
     return extract_json(response.choices[0].message.content)
 
 @bot.command()
-async def edit(ctx, *, instruction: str):
-    guild = ctx.guild
-    progress_msg = await ctx.send(f"✏️ Processing: *{instruction}*...")
-
-    try:
-        action_data = await parse_edit_instruction(instruction, guild)
-
-        if not action_data:
-            await progress_msg.edit(content="❌ Couldn't understand that instruction. Try being more specific!")
-            return
-
-        action = action_data.get("action")
-
-        # Add a channel
-        if action == "add_channel":
-            category = discord.utils.get(guild.categories, name=action_data.get("category"))
-            if action_data.get("type") == "voice":
-                channel = await guild.create_voice_channel(
-                    name=action_data["name"],
-                    category=category
-                )
-            else:
-                channel = await guild.create_text_channel(
-                    name=action_data["name"],
-                    category=category,
-                    topic=action_data.get("topic", "")
-                )
-            embed = discord.Embed(
-                title="✅ Channel Added!",
-                description=f"Created **{channel.name}** in **{category.name if category else 'No Category'}**",
-                color=discord.Color.green()
-            )
-
-        # Add a category
-        elif action == "add_category":
-            category = await guild.create_category(action_data["name"])
-            embed = discord.Embed(
-                title="✅ Category Added!",
-                description=f"Created category **{category.name}**",
-                color=discord.Color.green()
-            )
-
-        # Rename a channel
-        elif action == "rename_channel":
-            channel = discord.utils.get(guild.channels, name=action_data["old_name"])
-            if not channel:
-                await progress_msg.edit(content=f"❌ Couldn't find channel **{action_data['old_name']}**")
-                return
-            old_name = channel.name
-            await channel.edit(name=action_data["new_name"])
-            embed = discord.Embed(
-                title="✅ Channel Renamed!",
-                description=f"**{old_name}** → **{action_data['new_name']}**",
-                color=discord.Color.green()
-            )
-
-        # Rename a category
-        elif action == "rename_category":
-            category = discord.utils.get(guild.categories, name=action_data["old_name"])
-            if not category:
-                await progress_msg.edit(content=f"❌ Couldn't find category **{action_data['old_name']}**")
-                return
-            old_name = category.name
-            await category.edit(name=action_data["new_name"])
-            embed = discord.Embed(
-                title="✅ Category Renamed!",
-                description=f"**{old_name}** → **{action_data['new_name']}**",
-                color=discord.Color.green()
-            )
-
-        # Delete a channel
-        elif action == "delete_channel":
-            channel = discord.utils.get(guild.channels, name=action_data["name"])
-            if not channel:
-                await progress_msg.edit(content=f"❌ Couldn't find channel **{action_data['name']}**")
-                return
-            await channel.delete()
-            embed = discord.Embed(
-                title="🗑️ Channel Deleted!",
-                description=f"Deleted **{action_data['name']}**",
-                color=discord.Color.red()
-            )
-
-        # Delete a category
-        elif action == "delete_category":
-            category = discord.utils.get(guild.categories, name=action_data["name"])
-            if not category:
-                await progress_msg.edit(content=f"❌ Couldn't find category **{action_data['name']}**")
-                return
-            await category.delete()
-            embed = discord.Embed(
-                title="🗑️ Category Deleted!",
-                description=f"Deleted **{action_data['name']}**",
-                color=discord.Color.red()
-            )
-
-        # Add a role
-        elif action == "add_role":
-            color_value = int(action_data.get("color", "0x3498db"), 16)
-            role = await guild.create_role(
-                name=action_data["name"],
-                color=discord.Color(color_value),
-                mentionable=True
-            )
-            embed = discord.Embed(
-                title="✅ Role Added!",
-                description=f"Created role **{role.name}**",
-                color=discord.Color.green()
-            )
-
-        else:
-            await progress_msg.edit(content="❌ Unknown action. Try rephrasing your instruction!")
-            return
-
-        await progress_msg.edit(content=None, embed=embed)
-
-    except Exception as e:
-        await progress_msg.edit(content=f"❌ Something went wrong: {str(e)}")
+@commands.has_permissions(manage_channels=True)
+async def edit(ctx):
+    embed = discord.Embed(
+        title="✏️ Edit Server",
+        description="What would you like to do?",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="➕ Add Channel", value="Add a new channel to any category", inline=True)
+    embed.add_field(name="➕ Add Category", value="Create a new category", inline=True)
+    embed.add_field(name="✏️ Rename", value="Rename a channel or category", inline=True)
+    embed.add_field(name="🗑️ Delete", value="Delete a channel or category", inline=True)
+    await ctx.send(embed=embed, view=EditMenuView(ctx.guild))
 
 # ── MOD LOG HELPER ───────────────────────────────────────────────────────────────────────────────
 def is_higher_role(moderator: discord.Member, target: discord.Member) -> bool:
@@ -1632,6 +1526,436 @@ async def topic(ctx):
         await thinking.edit(content=None, embed=embed)
     except Exception as e:
         await thinking.edit(content=f"❌ Error: {str(e)}")
+
+
+# ── EDIT MENU VIEWS & MODALS ─────────────────────────────────────────────────────────────────
+
+class EditMenuView(discord.ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.guild = guild
+
+    @discord.ui.button(label="➕ Add Channel", style=discord.ButtonStyle.green, custom_id="edit_add_channel")
+    async def add_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        options = []
+        for cat in interaction.guild.categories[:25]:
+            options.append(discord.SelectOption(
+                label=cat.name[:100],
+                value=str(cat.id),
+                description=f"{len(cat.channels)} channels"
+            ))
+        if not options:
+            await interaction.response.send_message(
+                "❌ No categories found! Create a category first.",
+                ephemeral=True
+            )
+            return
+        view = CategorySelectView(options, "add_channel")
+        await interaction.response.send_message(
+            "📁 Which category should the new channel go in?",
+            view=view,
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="➕ Add Category", style=discord.ButtonStyle.green, custom_id="edit_add_category")
+    async def add_category(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddCategoryModal())
+
+    @discord.ui.button(label="✏️ Rename", style=discord.ButtonStyle.primary, custom_id="edit_rename")
+    async def rename(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = RenameTypeView()
+        await interaction.response.send_message(
+            "✏️ What do you want to rename?",
+            view=view,
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="🗑️ Delete", style=discord.ButtonStyle.red, custom_id="edit_delete")
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = DeleteTypeView()
+        await interaction.response.send_message(
+            "🗑️ What do you want to delete?",
+            view=view,
+            ephemeral=True
+        )
+
+
+class CategorySelectView(discord.ui.View):
+    def __init__(self, options: list, action: str):
+        super().__init__(timeout=60)
+        self.action = action
+        select = discord.ui.Select(
+            placeholder="Choose a category...",
+            options=options,
+            custom_id="category_select"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+        self.selected_category_id = None
+
+    async def on_select(self, interaction: discord.Interaction):
+        self.selected_category_id = int(interaction.data["values"][0])
+        category = interaction.guild.get_channel(self.selected_category_id)
+        await interaction.response.send_modal(
+            AddChannelModal(category)
+        )
+
+
+class AddChannelModal(discord.ui.Modal, title="➕ Add Channel"):
+    def __init__(self, category: discord.CategoryChannel):
+        super().__init__()
+        self.category = category
+
+    channel_name = discord.ui.TextInput(
+        label="Channel Name",
+        placeholder="e.g. red dead redemption, movie night...",
+        required=True,
+        max_length=100
+    )
+
+    channel_type = discord.ui.TextInput(
+        label="Type: text or voice",
+        placeholder="text",
+        required=False,
+        max_length=5,
+        default="text"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        guild = interaction.guild
+        name = self.channel_name.value.strip()
+        ch_type = self.channel_type.value.strip().lower() or "text"
+
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a Discord channel name formatter. "
+                            "Given a channel name and its category, return a decorated channel name "
+                            "that matches the style of the category. "
+                            "For text channels use emoji prefix like 「🎮」or 📺・ "
+                            "For voice channels start with 🔊・ "
+                            "Return ONLY the formatted channel name, nothing else. "
+                            "Keep it lowercase with hyphens."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Category: {self.category.name}\nChannel name: {name}\nType: {ch_type}"
+                    }
+                ]
+            )
+            formatted_name = response.choices[0].message.content.strip().strip('"')
+        except:
+            if ch_type == "voice":
+                formatted_name = f"🔊・{name.lower().replace(' ', '-')}"
+            else:
+                formatted_name = f"「💬」{name.lower().replace(' ', '-')}"
+
+        try:
+            if ch_type == "voice":
+                channel = await guild.create_voice_channel(
+                    name=formatted_name,
+                    category=self.category
+                )
+            else:
+                channel = await guild.create_text_channel(
+                    name=formatted_name,
+                    category=self.category
+                )
+
+            embed = discord.Embed(
+                title="✅ Channel Created!",
+                description=f"Created **{channel.name}** in **{self.category.name}**",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}")
+
+
+class AddCategoryModal(discord.ui.Modal, title="➕ Add Category"):
+    category_name = discord.ui.TextInput(
+        label="Category Name",
+        placeholder="e.g. Music Zone, Movie Night...",
+        required=True,
+        max_length=100
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        guild = interaction.guild
+        name = self.category_name.value.strip()
+
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a Discord category name formatter. "
+                            "Given a category name, return a decorated version with "
+                            "emoji borders like: ╔══〔 🎵 MUSIC ZONE 〕══╗ "
+                            "Return ONLY the formatted name, nothing else."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Category name: {name}"
+                    }
+                ]
+            )
+            formatted_name = response.choices[0].message.content.strip().strip('"')
+        except:
+            formatted_name = f"〔 {name.upper()} 〕"
+
+        try:
+            category = await guild.create_category(formatted_name)
+            embed = discord.Embed(
+                title="✅ Category Created!",
+                description=f"Created category **{category.name}**",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}")
+
+
+class RenameTypeView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(label="💬 Rename Channel", style=discord.ButtonStyle.primary, custom_id="rename_channel_btn")
+    async def rename_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        options = []
+        for channel in interaction.guild.text_channels[:25]:
+            options.append(discord.SelectOption(
+                label=channel.name[:100],
+                value=str(channel.id)
+            ))
+        if not options:
+            await interaction.response.send_message("❌ No text channels found!", ephemeral=True)
+            return
+        view = ChannelRenameSelectView(options)
+        await interaction.response.edit_message(
+            content="💬 Which channel do you want to rename?",
+            view=view
+        )
+
+    @discord.ui.button(label="📁 Rename Category", style=discord.ButtonStyle.primary, custom_id="rename_category_btn")
+    async def rename_category(self, interaction: discord.Interaction, button: discord.ui.Button):
+        options = []
+        for cat in interaction.guild.categories[:25]:
+            options.append(discord.SelectOption(
+                label=cat.name[:100],
+                value=str(cat.id)
+            ))
+        if not options:
+            await interaction.response.send_message("❌ No categories found!", ephemeral=True)
+            return
+        view = CategoryRenameSelectView(options)
+        await interaction.response.edit_message(
+            content="📁 Which category do you want to rename?",
+            view=view
+        )
+
+
+class ChannelRenameSelectView(discord.ui.View):
+    def __init__(self, options: list):
+        super().__init__(timeout=60)
+        select = discord.ui.Select(
+            placeholder="Choose a channel...",
+            options=options,
+            custom_id="channel_rename_select"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        channel_id = int(interaction.data["values"][0])
+        channel = interaction.guild.get_channel(channel_id)
+        await interaction.response.send_modal(RenameChannelModal(channel))
+
+
+class RenameChannelModal(discord.ui.Modal, title="✏️ Rename Channel"):
+    def __init__(self, channel):
+        super().__init__()
+        self.channel = channel
+
+    new_name = discord.ui.TextInput(
+        label="New Channel Name",
+        placeholder="e.g. game-lounge, movie-night...",
+        required=True,
+        max_length=100
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        old_name = self.channel.name
+        try:
+            await self.channel.edit(name=self.new_name.value.strip().lower().replace(" ", "-"))
+            embed = discord.Embed(
+                title="✅ Channel Renamed!",
+                description=f"**{old_name}** → **{self.channel.name}**",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}")
+
+
+class CategoryRenameSelectView(discord.ui.View):
+    def __init__(self, options: list):
+        super().__init__(timeout=60)
+        select = discord.ui.Select(
+            placeholder="Choose a category...",
+            options=options,
+            custom_id="category_rename_select"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        category_id = int(interaction.data["values"][0])
+        category = interaction.guild.get_channel(category_id)
+        await interaction.response.send_modal(RenameCategoryModal(category))
+
+
+class RenameCategoryModal(discord.ui.Modal, title="✏️ Rename Category"):
+    def __init__(self, category):
+        super().__init__()
+        self.category = category
+
+    new_name = discord.ui.TextInput(
+        label="New Category Name",
+        placeholder="e.g. Music Zone, Movie Night...",
+        required=True,
+        max_length=100
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        old_name = self.category.name
+
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Format this as a decorated Discord category name with emoji borders like: ╔══〔 🎵 MUSIC ZONE 〕══╗. Return ONLY the formatted name."
+                    },
+                    {"role": "user", "content": self.new_name.value.strip()}
+                ]
+            )
+            formatted = response.choices[0].message.content.strip().strip('"')
+        except:
+            formatted = f"〔 {self.new_name.value.upper()} 〕"
+
+        try:
+            await self.category.edit(name=formatted)
+            embed = discord.Embed(
+                title="✅ Category Renamed!",
+                description=f"**{old_name}** → **{formatted}**",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}")
+
+
+class DeleteTypeView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(label="💬 Delete Channel", style=discord.ButtonStyle.red, custom_id="delete_channel_btn")
+    async def delete_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        options = []
+        for channel in interaction.guild.text_channels[:25]:
+            options.append(discord.SelectOption(
+                label=channel.name[:100],
+                value=str(channel.id)
+            ))
+        if not options:
+            await interaction.response.send_message("❌ No text channels found!", ephemeral=True)
+            return
+        view = ChannelDeleteSelectView(options)
+        await interaction.response.edit_message(
+            content="💬 Which channel do you want to delete?",
+            view=view
+        )
+
+    @discord.ui.button(label="📁 Delete Category", style=discord.ButtonStyle.red, custom_id="delete_category_btn")
+    async def delete_category(self, interaction: discord.Interaction, button: discord.ui.Button):
+        options = []
+        for cat in interaction.guild.categories[:25]:
+            options.append(discord.SelectOption(
+                label=cat.name[:100],
+                value=str(cat.id)
+            ))
+        if not options:
+            await interaction.response.send_message("❌ No categories found!", ephemeral=True)
+            return
+        view = CategoryDeleteSelectView(options)
+        await interaction.response.edit_message(
+            content="📁 Which category do you want to delete?",
+            view=view
+        )
+
+
+class ChannelDeleteSelectView(discord.ui.View):
+    def __init__(self, options: list):
+        super().__init__(timeout=60)
+        select = discord.ui.Select(
+            placeholder="Choose a channel to delete...",
+            options=options,
+            custom_id="channel_delete_select"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        channel_id = int(interaction.data["values"][0])
+        channel = interaction.guild.get_channel(channel_id)
+        name = channel.name
+        await channel.delete()
+        embed = discord.Embed(
+            title="🗑️ Channel Deleted!",
+            description=f"Deleted **{name}**",
+            color=discord.Color.red()
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=None)
+
+
+class CategoryDeleteSelectView(discord.ui.View):
+    def __init__(self, options: list):
+        super().__init__(timeout=60)
+        select = discord.ui.Select(
+            placeholder="Choose a category to delete...",
+            options=options,
+            custom_id="category_delete_select"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        category_id = int(interaction.data["values"][0])
+        category = interaction.guild.get_channel(category_id)
+        name = category.name
+        for channel in category.channels:
+            await channel.delete()
+        await category.delete()
+        embed = discord.Embed(
+            title="🗑️ Category Deleted!",
+            description=f"Deleted **{name}** and all its channels",
+            color=discord.Color.red()
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=None)
 
 
 # ── GUIDE COMMANDS ────────────────────────────────────────────────────────────────────────────
