@@ -10,6 +10,7 @@ from discord.ui import Button, View
 from PIL import Image, ImageDraw, ImageFont
 import io
 import math
+import aiohttp
 
 load_dotenv()
 
@@ -1895,6 +1896,14 @@ def get_prestige_badge(prestige: int) -> str:
 async def generate_rank_card(member: discord.Member, data: dict, rank_position: int) -> discord.File:
     # Get role color
     role_color = (88, 101, 242)  # Default discord blurple
+    # Better fallback colors based on level
+    default_colors = [
+        (88, 101, 242),   # Blurple
+        (87, 242, 135),   # Green
+        (254, 231, 92),   # Yellow
+        (235, 69, 158),   # Pink
+        (255, 115, 55),   # Orange
+    ]
     for role in reversed(member.roles):
         if role.color.value != 0:
             role_color = (role.color.r, role.color.g, role.color.b)
@@ -1929,10 +1938,10 @@ async def generate_rank_card(member: discord.Member, data: dict, rank_position: 
 
     # Avatar circle
     try:
-        import urllib.request
         avatar_url = str(member.display_avatar.replace(size=128))
-        with urllib.request.urlopen(avatar_url) as response:
-            avatar_data = response.read()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(avatar_url) as resp:
+                avatar_data = await resp.read()
         avatar = Image.open(io.BytesIO(avatar_data)).convert("RGBA")
         avatar = avatar.resize((120, 120))
         mask = Image.new("L", (120, 120), 0)
