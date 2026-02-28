@@ -266,6 +266,9 @@ class RoleView(discord.ui.View):
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
     bot.add_view(RoleView([]))
+    bot.add_view(TicketOpenView())
+    bot.add_view(TicketCloseView())
+    bot.add_view(TicketConfirmCloseView())
     # Load saved state so member role survives restarts
     state = load_state()
     if "member_role_id" in state:
@@ -699,6 +702,11 @@ async def guide(ctx):
     embed.add_field(
         name="💣 !nuke",
         value="Wipes all channels and roles so you can start fresh with !setup\nOnly the server owner can use this\nExample: `!nuke` → `!confirmnuke` or `!cancelnuke`",
+        inline=False
+    )
+    embed.add_field(
+        name="🎫 !ticket setup",
+        value="Creates the ticket channel so users can open support tickets\nAlso: `!ticket add @user` and `!ticket remove @user`",
         inline=False
     )
     embed.set_footer(text="Architect AI • Built with discord.py + Groq")
@@ -1554,6 +1562,259 @@ async def cancelnuke(ctx):
         return
     bot.nuke_pending = False
     await ctx.send("✅ Nuke cancelled. Server is safe!")
+
+
+# ── TICKET SYSTEM ─────────────────────────────────────────────────────────────────────────────
+
+class TicketOpenView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="📩 Open Ticket", style=discord.ButtonStyle.green, custom_id="open_ticket")
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        member = interaction.user
+
+        # Check if user already has an open ticket
+        existing = discord.utils.get(guild.text_channels, name=f"ticket-{member.name.lower()}")
+        if existing:
+            await interaction.response.send_message(
+                f"❌ You already have an open ticket! {existing.mention}",
+                ephemeral=True
+            )
+            return
+
+        # Get staff roles
+        admin_role = discord.utils.get(guild.roles, name="Admin")
+        mod_role = discord.utils.get(guild.roles, name="Moderator")
+
+        # Set permissions
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            member: discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                attach_files=True,
+                embed_links=True
+            ),
+            guild.me: discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                manage_channels=True
+            )
+        }
+        if admin_role:
+            overwrites[admin_role] = discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True
+            )
+        if mod_role:
+            overwrites[mod_role] = discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True
+            )
+
+        # Find or create tickets category
+        category = discord.utils.get(guild.categories, name="🎫 TICKETS")
+        if not category:
+            category = await guild.create_category("🎫 TICKETS")
+            if admin_role:
+                await category.set_permissions(admin_role, read_messages=True)
+            if mod_role:
+                await category.set_permissions(mod_role, read_messages=True)
+            await category.set_permissions(guild.default_role, read_messages=False)
+
+        # Create ticket channel
+        ticket_channel = await guild.create_text_channel(
+            name=f"ticket-{member.name.lower()}",
+            category=category,
+            overwrites=overwrites,
+            topic=f"Ticket opened by {member.name} | {member.id}"
+        )
+
+        # Send welcome message in ticket
+        embed = discord.Embed(
+            title="🎫 Ticket Opened!",
+            description=(
+                f"Hey {member.mention}, thanks for opening a ticket!\n\n"
+                f"Please describe your issue and a staff member will help you shortly.\n\n"
+                f"**Staff:** {admin_role.mention if admin_role else ''} "
+                f"{mod_role.mention if mod_role else ''}"
+            ),
+            color=discord.Color.green()
+        )
+        embed.set_footer(text="Click 🔒 Close Ticket when your issue is resolved")
+        await ticket_channel.send(
+            embed=embed,
+            view=TicketCloseView()
+        )
+
+        await interaction.response.send_message(
+            f"✅ Your ticket has been created! {ticket_channel.mention}",
+            ephemeral=True
+        )
+
+        # Log to mod-logs
+        log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
+        if not log_channel:
+            log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+        if log_channel:
+            log_embed = discord.Embed(
+                title="🎫 Ticket Opened",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            log_embed.add_field(name="User", value=f"{member.mention} ({member.name})", inline=True)
+            log_embed.add_field(name="Channel", value=ticket_channel.mention, inline=True)
+            log_embed.set_thumbnail(url=member.display_avatar.url)
+            await log_channel.send(embed=log_embed)
+
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.red, custom_id="close_ticket")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel
+        guild = interaction.guild
+        member = interaction.user
+
+        # Only staff or the ticket owner can close
+        admin_role = discord.utils.get(guild.roles, name="Admin")
+        mod_role = discord.utils.get(guild.roles, name="Moderator")
+        is_staff = (
+            admin_role in member.roles or
+            mod_role in member.roles or
+            member == guild.owner
+        )
+        is_ticket_owner = str(member.id) in (channel.topic or "")
+
+        if not is_staff and not is_ticket_owner:
+            await interaction.response.send_message(
+                "❌ Only staff or the ticket owner can close this ticket!",
+                ephemeral=True
+            )
+            return
+
+        # Confirmation
+        confirm_embed = discord.Embed(
+            title="🔒 Close Ticket?",
+            description="Are you sure you want to close this ticket?",
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(
+            embed=confirm_embed,
+            view=TicketConfirmCloseView(),
+            ephemeral=True
+        )
+
+
+class TicketConfirmCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=30)
+
+    @discord.ui.button(label="✅ Yes, Close It", style=discord.ButtonStyle.red, custom_id="confirm_close")
+    async def confirm_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel
+        guild = interaction.guild
+        member = interaction.user
+
+        # Collect transcript
+        messages = []
+        async for message in channel.history(limit=100, oldest_first=True):
+            if not message.author.bot:
+                messages.append(f"[{message.created_at.strftime('%H:%M')}] {message.author.name}: {message.content}")
+
+        transcript = "\n".join(messages) if messages else "No messages"
+
+        # Log to mod-logs with transcript
+        log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
+        if not log_channel:
+            log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+        if log_channel:
+            log_embed = discord.Embed(
+                title="🔒 Ticket Closed",
+                color=discord.Color.red(),
+                timestamp=discord.utils.utcnow()
+            )
+            log_embed.add_field(name="Channel", value=channel.name, inline=True)
+            log_embed.add_field(name="Closed By", value=f"{member.mention}", inline=True)
+            log_embed.add_field(
+                name="Transcript",
+                value=f"```{transcript[:800]}```" if transcript else "Empty",
+                inline=False
+            )
+            await log_channel.send(embed=log_embed)
+
+        await interaction.response.send_message("🔒 Closing ticket...")
+        await asyncio.sleep(2)
+        await channel.delete()
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary, custom_id="cancel_close")
+    async def cancel_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("✅ Ticket close cancelled!", ephemeral=True)
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def ticket(ctx, action: str = "setup", member: discord.Member = None):
+    guild = ctx.guild
+
+    if action == "setup":
+        # Create ticket channel with open button
+        existing = discord.utils.get(guild.text_channels, name="「🎫」tickets")
+        if existing:
+            await ctx.send(f"❌ Ticket channel already exists! {existing.mention}")
+            return
+
+        ticket_channel = await guild.create_text_channel(name="「🎫」tickets")
+
+        embed = discord.Embed(
+            title="🎫 Support Tickets",
+            description=(
+                "Need help? Have a question? Want to report something?\n\n"
+                "Click the button below to open a private ticket with staff!\n\n"
+                "📋 **Guidelines:**\n"
+                "• One ticket per issue\n"
+                "• Be respectful to staff\n"
+                "• Provide as much detail as possible\n"
+                "• Don't spam open/close tickets"
+            ),
+            color=discord.Color.blurple()
+        )
+        embed.set_footer(text="Tickets are logged for safety purposes")
+        await ticket_channel.send(embed=embed, view=TicketOpenView())
+
+        await ctx.send(
+            embed=discord.Embed(
+                title="✅ Ticket System Setup!",
+                description=f"Ticket channel created at {ticket_channel.mention}",
+                color=discord.Color.green()
+            )
+        )
+
+    elif action == "add" and member:
+        if not ctx.channel.name.startswith("ticket-"):
+            await ctx.send("❌ This command only works inside a ticket channel!")
+            return
+        await ctx.channel.set_permissions(member, read_messages=True, send_messages=True)
+        await ctx.send(f"✅ Added {member.mention} to the ticket!")
+
+    elif action == "remove" and member:
+        if not ctx.channel.name.startswith("ticket-"):
+            await ctx.send("❌ This command only works inside a ticket channel!")
+            return
+        await ctx.channel.set_permissions(member, overwrite=None)
+        await ctx.send(f"✅ Removed {member.mention} from the ticket!")
+
+    else:
+        await ctx.send(
+            "❌ Invalid usage!\n"
+            "`!ticket setup` — creates the ticket channel\n"
+            "`!ticket add @user` — adds user to current ticket\n"
+            "`!ticket remove @user` — removes user from current ticket"
+        )
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
