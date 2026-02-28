@@ -2962,4 +2962,23 @@ async def greroll(ctx, message_id: str):
     )
 
 
+@bot.command(name="guide")
+async def guide(ctx):
+    embed = discord.Embed(
+        title="🏗️ Architect AI",
+        description=(
+            "I build fully customized Discord servers from scratch!\n\n"
+            "**Getting Started:**\n"
+            "Type `!setup` and pick a template — a popup will guide you!\n\n"
+            "Select a category below to see commands:"
+        ),
+        color=discord.Color.blurple()
+    )
+    embed.add_field(name="🏗️ Setup", value="Server building commands", inline=True)
+    embed.add_field(name="🔨 Moderation", value="Kick, ban, warn and more", inline=True)
+    embed.add_field(name="🎮 Fun & Levels", value="XP, giveaways, games", inline=True)
+    embed.set_footer(text="Architect AI • Built with discord.py + Groq")
+    await ctx.send(embed=embed, view=GuideView())
+
+
 bot.run(os.getenv("DISCORD_TOKEN"))
