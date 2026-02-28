@@ -1172,9 +1172,9 @@ async def on_member_join(member):
         title=f"👋 Welcome to {guild.name}!",
         description=(
             f"Hey {member.mention}, we're glad you're here!\n\n"
-            f"📋 Check out the rules channel to get started.\n"
             f"🎭 Head to **#get-your-roles** to pick your roles.\n"
-            f"💬 Introduce yourself and say hi!"
+            f"💬 Introduce yourself and say hi!\n"
+            f"💬 Check out the channels and make yourself at home!"
         ),
         color=discord.Color.blurple()
     )
@@ -2896,10 +2896,13 @@ async def generate_rank_card(member: discord.Member, data: dict, rank_position: 
         (235, 69, 158),   # Pink
         (255, 115, 55),   # Orange
     ]
+    # Skip staff roles, only use decorative/color roles
+    staff_role_names = ["admin", "moderator", "mod", "member", "staff"]
     for role in reversed(member.roles):
         if role.color.value != 0:
-            role_color = (role.color.r, role.color.g, role.color.b)
-            break
+            if not any(s in role.name.lower() for s in staff_role_names):
+                role_color = (role.color.r, role.color.g, role.color.b)
+                break
 
     current_xp = data["xp"]
     current_level = get_level_from_xp(current_xp)
