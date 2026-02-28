@@ -7,6 +7,9 @@ import json
 import re
 import asyncio
 from discord.ui import Button, View
+from PIL import Image, ImageDraw, ImageFont
+import io
+import math
 
 load_dotenv()
 
@@ -31,6 +34,18 @@ def save_state(data: dict):
     current.update(data)
     with open(STATE_FILE, "w") as f:
         json.dump(current, f, indent=2)
+
+LEVELS_FILE = "levels.json"
+
+def load_levels() -> dict:
+    if os.path.exists(LEVELS_FILE):
+        with open(LEVELS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_levels(data: dict):
+    with open(LEVELS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 SERVER_TEMPLATES = {
     "gaming": {
@@ -269,6 +284,8 @@ async def on_ready():
     bot.add_view(TicketOpenView())
     bot.add_view(TicketCloseView())
     bot.add_view(TicketConfirmCloseView())
+    # Init XP cooldown tracker
+    bot.xp_cooldowns = {}
     # Load saved state so member role survives restarts
     state = load_state()
     if "member_role_id" in state:
@@ -1815,6 +1832,329 @@ async def ticket(ctx, action: str = "setup", member: discord.Member = None):
             "`!ticket add @user` — adds user to current ticket\n"
             "`!ticket remove @user` — removes user from current ticket"
         )
+
+
+# ── LEVELING SYSTEM ─────────────────────────────────────────────────────────────────────────────
+
+def get_xp_for_level(level: int) -> int:
+    return 100 * (level ** 2) + 50 * level
+
+def get_level_from_xp(xp: int) -> int:
+    level = 0
+    while xp >= get_xp_for_level(level + 1):
+        level += 1
+    return level
+
+def get_title(level: int, prestige: int) -> str:
+    if prestige >= 5:
+        return "👑 Legend"
+    elif prestige == 4:
+        return "🌌 Ascended"
+    elif prestige == 3:
+        return "💫 Mythic"
+    elif prestige == 2:
+        return "🔮 Mystic"
+    elif prestige == 1:
+        return "✨ Prestige"
+    elif level >= 30:
+        return "💎 Elite"
+    elif level >= 20:
+        return "🔥 Veteran"
+    elif level >= 10:
+        return "⚡ Active"
+    elif level >= 5:
+        return "👣 Regular"
+    else:
+        return "🌱 Newcomer"
+
+def get_prestige_badge(prestige: int) -> str:
+    badges = {
+        0: "",
+        1: "✨",
+        2: "🔮",
+        3: "💫",
+        4: "🌌",
+        5: "👑"
+    }
+    return badges.get(prestige, "👑")
+
+async def generate_rank_card(member: discord.Member, data: dict, rank_position: int) -> discord.File:
+    # Get role color
+    role_color = (88, 101, 242)  # Default discord blurple
+    for role in reversed(member.roles):
+        if role.color.value != 0:
+            role_color = (role.color.r, role.color.g, role.color.b)
+            break
+
+    current_xp = data["xp"]
+    current_level = get_level_from_xp(current_xp)
+    prestige = data.get("prestige", 0)
+    next_level_xp = get_xp_for_level(current_level + 1)
+    current_level_xp = get_xp_for_level(current_level)
+    progress_xp = current_xp - current_level_xp
+    needed_xp = next_level_xp - current_level_xp
+    progress_percent = progress_xp / needed_xp if needed_xp > 0 else 1
+
+    # Create card
+    width, height = 800, 200
+    img = Image.new("RGBA", (width, height), (30, 30, 35, 255))
+    draw = ImageDraw.Draw(img)
+
+    # Background gradient using role color
+    for i in range(width):
+        alpha = int(180 * (i / width))
+        r = int(role_color[0] * (i / width))
+        g = int(role_color[1] * (i / width))
+        b = int(role_color[2] * (i / width))
+        draw.line([(i, 0), (i, height)], fill=(r, g, b, alpha))
+
+    # Dark overlay for readability
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 120))
+    img = Image.alpha_composite(img, overlay)
+    draw = ImageDraw.Draw(img)
+
+    # Avatar circle
+    try:
+        import urllib.request
+        avatar_url = str(member.display_avatar.replace(size=128))
+        with urllib.request.urlopen(avatar_url) as response:
+            avatar_data = response.read()
+        avatar = Image.open(io.BytesIO(avatar_data)).convert("RGBA")
+        avatar = avatar.resize((120, 120))
+        mask = Image.new("L", (120, 120), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.ellipse((0, 0, 120, 120), fill=255)
+        img.paste(avatar, (40, 40), mask)
+    except:
+        draw.ellipse([40, 40, 160, 160], fill=role_color)
+
+    # Role color circle border
+    draw.ellipse([36, 36, 164, 164], outline=role_color, width=4)
+
+    # Username
+    draw.text((200, 35), member.display_name[:20], fill=(255, 255, 255), font=None)
+
+    # Title
+    title = get_title(current_level, prestige)
+    draw.text((200, 65), title, fill=role_color, font=None)
+
+    # Rank and Level
+    draw.text((200, 95), f"RANK #{rank_position}     LEVEL {current_level}", fill=(200, 200, 200), font=None)
+
+    # Prestige badge
+    if prestige > 0:
+        badge = get_prestige_badge(prestige)
+        draw.text((200, 115), f"Prestige {prestige} {badge}", fill=(255, 215, 0), font=None)
+
+    # XP bar background
+    bar_x, bar_y = 200, 145
+    bar_width, bar_height = 540, 20
+    draw.rounded_rectangle(
+        [bar_x, bar_y, bar_x + bar_width, bar_y + bar_height],
+        radius=10,
+        fill=(60, 60, 65)
+    )
+
+    # XP bar fill
+    fill_width = int(bar_width * progress_percent)
+    if fill_width > 0:
+        draw.rounded_rectangle(
+            [bar_x, bar_y, bar_x + fill_width, bar_y + bar_height],
+            radius=10,
+            fill=role_color
+        )
+
+    # XP text
+    draw.text(
+        (bar_x, bar_y + 25),
+        f"{progress_xp} / {needed_xp} XP",
+        fill=(180, 180, 180),
+        font=None
+    )
+
+    # Messages count
+    draw.text(
+        (bar_x + bar_width - 100, bar_y + 25),
+        f"💬 {data.get('messages', 0)} msgs",
+        fill=(180, 180, 180),
+        font=None
+    )
+
+    # Convert to file
+    buffer = io.BytesIO()
+    img.save(buffer, "PNG")
+    buffer.seek(0)
+    return discord.File(buffer, filename="rank.png")
+
+
+@bot.command()
+async def rank(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    guild_id = str(ctx.guild.id)
+    user_id = str(member.id)
+
+    levels = load_levels()
+    if guild_id not in levels or user_id not in levels[guild_id]:
+        await ctx.send(f"❌ {member.mention} hasn't earned any XP yet! Start chatting!")
+        return
+
+    data = levels[guild_id][user_id]
+    guild_data = levels.get(guild_id, {})
+    sorted_users = sorted(guild_data.items(), key=lambda x: x[1]["xp"], reverse=True)
+    rank_position = next((i + 1 for i, (uid, _) in enumerate(sorted_users) if uid == user_id), "?")
+
+    thinking = await ctx.send("🎨 Generating your rank card...")
+    try:
+        rank_card = await generate_rank_card(member, data, rank_position)
+        await thinking.delete()
+        await ctx.send(file=rank_card)
+    except Exception as e:
+        current_xp = data["xp"]
+        current_level = get_level_from_xp(current_xp)
+        prestige = data.get("prestige", 0)
+        next_level_xp = get_xp_for_level(current_level + 1)
+        current_level_xp = get_xp_for_level(current_level)
+        progress_xp = current_xp - current_level_xp
+        needed_xp = next_level_xp - current_level_xp
+        progress_percent = int((progress_xp / needed_xp) * 20)
+        progress_bar = "█" * progress_percent + "░" * (20 - progress_percent)
+        title = get_title(current_level, prestige)
+        badge = get_prestige_badge(prestige)
+
+        embed = discord.Embed(
+            title=f"⭐ {member.display_name}'s Rank",
+            color=discord.Color.gold()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="🏆 Rank", value=f"#{rank_position}", inline=True)
+        embed.add_field(name="⭐ Level", value=str(current_level), inline=True)
+        embed.add_field(name="🎭 Title", value=f"{badge} {title}", inline=True)
+        embed.add_field(name="💬 Messages", value=str(data.get("messages", 0)), inline=True)
+        embed.add_field(
+            name=f"XP — {progress_xp}/{needed_xp}",
+            value=f"`{progress_bar}` {int((progress_xp/needed_xp)*100)}%",
+            inline=False
+        )
+        await thinking.edit(content=None, embed=embed)
+
+
+@bot.event
+async def on_message(message):
+    # Ignore bots and DMs
+    if message.author.bot or not message.guild:
+        await bot.process_commands(message)
+        return
+
+    guild_id = str(message.guild.id)
+    user_id = str(message.author.id)
+
+    # XP cooldown — 60s per user to prevent spam farming
+    cooldown_key = f"{guild_id}:{user_id}"
+    now = asyncio.get_event_loop().time()
+    last = bot.xp_cooldowns.get(cooldown_key, 0)
+    if now - last >= 60:
+        bot.xp_cooldowns[cooldown_key] = now
+
+        levels = load_levels()
+        if guild_id not in levels:
+            levels[guild_id] = {}
+        if user_id not in levels[guild_id]:
+            levels[guild_id][user_id] = {"xp": 0, "level": 0, "messages": 0, "prestige": 0}
+
+        xp_gain = random.randint(15, 25)
+        levels[guild_id][user_id]["xp"] += xp_gain
+        levels[guild_id][user_id]["messages"] = levels[guild_id][user_id].get("messages", 0) + 1
+
+        old_level = get_level_from_xp(levels[guild_id][user_id]["xp"] - xp_gain)
+        new_level = get_level_from_xp(levels[guild_id][user_id]["xp"])
+
+        # Level up!
+        if new_level > old_level:
+            levels[guild_id][user_id]["level"] = new_level
+            prestige = levels[guild_id][user_id].get("prestige", 0)
+
+            # Check for prestige at level 50
+            if new_level >= 50:
+                prestige += 1
+                levels[guild_id][user_id]["prestige"] = prestige
+                levels[guild_id][user_id]["xp"] = 0
+                levels[guild_id][user_id]["level"] = 0
+                save_levels(levels)
+
+                badge = get_prestige_badge(prestige)
+                prestige_embed = discord.Embed(
+                    title=f"🌟 PRESTIGE {prestige} {badge}",
+                    description=(
+                        f"🎊 {message.author.mention} has reached **Prestige {prestige}!**\n\n"
+                        f"Their XP has been reset but they carry the prestigious **{badge}** badge!\n"
+                        f"New title: **{get_title(0, prestige)}**"
+                    ),
+                    color=discord.Color.gold()
+                )
+                prestige_embed.set_thumbnail(url=message.author.display_avatar.url)
+
+                # Give prestige role
+                prestige_role_name = f"{badge} Prestige {prestige}"
+                prestige_role = discord.utils.get(message.guild.roles, name=prestige_role_name)
+                if not prestige_role:
+                    prestige_role = await message.guild.create_role(
+                        name=prestige_role_name,
+                        color=discord.Color.gold(),
+                        hoist=True
+                    )
+                await message.author.add_roles(prestige_role)
+                await message.channel.send(embed=prestige_embed)
+                await bot.process_commands(message)
+                return
+
+            save_levels(levels)
+            title = get_title(new_level, prestige)
+            badge = get_prestige_badge(prestige)
+
+            embed = discord.Embed(
+                title="⭐ Level Up!",
+                description=(
+                    f"🎉 {message.author.mention} just reached **Level {new_level}!**\n"
+                    f"Title: **{title}**"
+                    + (f" {badge}" if prestige > 0 else "")
+                ),
+                color=discord.Color.gold()
+            )
+            embed.set_thumbnail(url=message.author.display_avatar.url)
+
+            # Title role rewards
+            title_roles = {
+                5:  ("👣 Regular",  discord.Color.green()),
+                10: ("⚡ Active",   discord.Color.blue()),
+                20: ("🔥 Veteran",  discord.Color.orange()),
+                30: ("💎 Elite",    discord.Color.purple()),
+            }
+            if new_level in title_roles:
+                role_name, role_color = title_roles[new_level]
+                # Remove old title roles
+                old_title_roles = [r for r in message.author.roles if r.name in [v[0] for v in title_roles.values()]]
+                if old_title_roles:
+                    await message.author.remove_roles(*old_title_roles)
+                # Add new title role
+                role = discord.utils.get(message.guild.roles, name=role_name)
+                if not role:
+                    role = await message.guild.create_role(
+                        name=role_name,
+                        color=role_color,
+                        hoist=True
+                    )
+                await message.author.add_roles(role)
+                embed.add_field(
+                    name="🎁 New Title Unlocked!",
+                    value=f"You are now a **{role_name}**!",
+                    inline=False
+                )
+
+            await message.channel.send(embed=embed)
+        else:
+            save_levels(levels)
+
+    await bot.process_commands(message)
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
