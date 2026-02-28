@@ -229,7 +229,8 @@ class TemplateView(discord.ui.View):
             self.add_item(TemplateButton(key, data))
 
 class RoleButton(discord.ui.Button):
-    def __init__(self, role_name: str, role_id: int, style=discord.ButtonStyle.primary):
+    def __init__(self, role_name: str, role_id: int,
+                 style=discord.ButtonStyle.primary):
         super().__init__(
             label=role_name,
             style=style,
@@ -238,46 +239,64 @@ class RoleButton(discord.ui.Button):
         self.role_id = role_id
 
     async def callback(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        role = guild.get_role(self.role_id)
-        member = interaction.user
+        try:
+            guild = interaction.guild
+            role = guild.get_role(self.role_id)
+            member = interaction.user
 
-        if role is None:
-            await interaction.response.send_message("❌ Role not found!", ephemeral=True)
-            return
+            if role is None:
+                await interaction.response.send_message(
+                    "❌ This role no longer exists! Ask an admin to run `!refreshroles`",
+                    ephemeral=True
+                )
+                return
 
-        # Detect if this is a color role by checking its name starts with a pastel emoji
-        pastel_emojis = ["🌸", "🍋", "🍵", "🩵", "🍇", "🍑", "🤍"]
-        is_color_role = any(role.name.startswith(emoji) for emoji in pastel_emojis)
+            pastel_emojis = ["🌸", "🍋", "🍵", "🩵", "🍇", "🍑", "🤍"]
+            is_color_role = any(role.name.startswith(emoji) for emoji in pastel_emojis)
 
-        if role in member.roles:
-            await member.remove_roles(role)
-            await interaction.response.send_message(
-                f"✅ Removed **{role.name}** from you!",
-                ephemeral=True
-            )
-        else:
-            if is_color_role:
-                # Remove all other color roles first so only one color shows
-                color_roles_to_remove = [
-                    r for r in member.roles
-                    if any(r.name.startswith(emoji) for emoji in pastel_emojis)
-                ]
-                if color_roles_to_remove:
-                    await member.remove_roles(*color_roles_to_remove)
-            await member.add_roles(role)
-            await interaction.response.send_message(
-                f"🎉 You now have **{role.name}**!",
-                ephemeral=True
-            )
+            if role in member.roles:
+                await member.remove_roles(role)
+                await interaction.response.send_message(
+                    f"✅ Removed **{role.name}** from you!",
+                    ephemeral=True
+                )
+            else:
+                if is_color_role:
+                    color_roles_to_remove = [
+                        r for r in member.roles
+                        if any(r.name.startswith(emoji) for emoji in pastel_emojis)
+                    ]
+                    if color_roles_to_remove:
+                        await member.remove_roles(*color_roles_to_remove)
+                await member.add_roles(role)
+                await interaction.response.send_message(
+                    f"🎉 You now have **{role.name}**!",
+                    ephemeral=True
+                )
+        except Exception as e:
+            try:
+                await interaction.response.send_message(
+                    f"❌ Something went wrong: {str(e)}",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 class RoleView(discord.ui.View):
-    def __init__(self, roles: list, color_roles: list = []):
+    def __init__(self, roles: list = [], color_roles: list = []):
         super().__init__(timeout=None)
         for role in roles:
-            self.add_item(RoleButton(role["name"], role["id"], discord.ButtonStyle.primary))
+            self.add_item(RoleButton(
+                role["name"],
+                role["id"],
+                discord.ButtonStyle.primary
+            ))
         for role in color_roles:
-            self.add_item(RoleButton(role["name"], role["id"], discord.ButtonStyle.secondary))
+            self.add_item(RoleButton(
+                role["name"],
+                role["id"],
+                discord.ButtonStyle.secondary
+            ))
 
 @bot.event
 async def on_ready():
@@ -286,9 +305,17 @@ async def on_ready():
     # Initialize cooldowns first before anything else
     bot.xp_cooldowns = {}
 
+    # Load saved role data first
+    state = load_state()
+    saved_decorative = state.get("decorative_roles", [])
+    saved_color = state.get("color_roles", [])
+    bot.decorative_roles = saved_decorative
+    bot.color_roles = saved_color
+
     # Register views safely one by one
     views_to_register = [
-        RoleView([]),
+        RoleView(saved_decorative, []),
+        RoleView([], saved_color),
         TemplateView(),
         TicketOpenView(),
         TicketCloseView(),
@@ -307,7 +334,6 @@ async def on_ready():
         )
     )
 
-    state = load_state()
     if "member_role_id" in state:
         bot.member_role_id = state["member_role_id"]
         print(f"✅ Loaded member role ID: {bot.member_role_id}")
@@ -601,16 +627,34 @@ async def confirm(ctx):
             if r.get("type") == "color" and r["name"] in role_objects
         ]
 
-        view = RoleView(decorative_roles, color_roles)
+        # Send identity roles as first message
+        identity_view = RoleView(decorative_roles, [])
         await roles_channel.send(
             content=(
-                "**🎭 Get Your Roles!**\n\n"
-                "🔵 **Identity Roles** — Pick what describes you!\n"
-                "⚪ **Color Roles** — Pick your color! (one at a time)\n\n"
-                "Click any button to get or remove a role!"
+                "**🎭 Identity Roles**\n\n"
+                "Pick what describes you!\n"
+                "Click to get or remove a role!"
             ),
-            view=view
+            view=identity_view
         )
+
+        # Send color roles as second message
+        color_view = RoleView([], color_roles)
+        await roles_channel.send(
+            content=(
+                "**🎨 Color Roles**\n\n"
+                "Pick your color! Choosing a new one removes the old one automatically!"
+            ),
+            view=color_view
+        )
+
+        # Save role data to state.json so buttons survive restarts
+        save_state({
+            "decorative_roles": decorative_roles,
+            "color_roles": color_roles
+        })
+        bot.decorative_roles = decorative_roles
+        bot.color_roles = color_roles
 
         # Step 5 — Save state for undo
         bot.last_build = created
@@ -755,6 +799,11 @@ async def guide(ctx):
     embed.add_field(
         name="📊 !serverstats",
         value="Creates a live stats display at the top of your server\nAlso: `!updatestats` to force refresh, `!removestats` to remove",
+        inline=False
+    )
+    embed.add_field(
+        name="🔄 !refreshroles",
+        value="Fixes role buttons after a bot restart or rebuild",
         inline=False
     )
     embed.set_footer(text="Architect AI • Built with discord.py + Groq")
@@ -2429,6 +2478,50 @@ async def auto_update_stats():
 @auto_update_stats.before_loop
 async def before_stats():
     await bot.wait_until_ready()
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def refreshroles(ctx):
+    guild = ctx.guild
+    state = load_state()
+    decorative_roles = state.get("decorative_roles", [])
+    color_roles = state.get("color_roles", [])
+
+    if not decorative_roles and not color_roles:
+        await ctx.send("❌ No saved role data found! Run `!setup` and `!confirm` first.")
+        return
+
+    # Find the roles channel
+    roles_channel = discord.utils.get(guild.text_channels, name="get-your-roles")
+    if not roles_channel:
+        await ctx.send("❌ Couldn't find #get-your-roles channel!")
+        return
+
+    # Delete old messages
+    await roles_channel.purge(limit=10)
+
+    # Repost with fresh views
+    identity_view = RoleView(decorative_roles, [])
+    await roles_channel.send(
+        content=(
+            "**🎭 Identity Roles**\n\n"
+            "Pick what describes you!\n"
+            "Click to get or remove a role!"
+        ),
+        view=identity_view
+    )
+
+    color_view = RoleView([], color_roles)
+    await roles_channel.send(
+        content=(
+            "**🎨 Color Roles**\n\n"
+            "Pick your color! Choosing a new one removes the old one automatically!"
+        ),
+        view=color_view
+    )
+
+    await ctx.send("✅ Role buttons refreshed!", delete_after=3)
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
