@@ -884,6 +884,77 @@ async def confirm(ctx):
         embed.set_footer(text="Type !undo to revert everything • !guide to see all commands")
         await progress_msg.edit(content=None, embed=embed)
 
+        # Auto setup ticket system if requested
+        if getattr(bot, 'setup_wants_tickets', True):
+            try:
+                existing_ticket = discord.utils.get(ctx.guild.text_channels, name="「🎫」tickets")
+                if not existing_ticket:
+                    ticket_channel = await ctx.guild.create_text_channel(name="「🎫」tickets")
+                    ticket_embed = discord.Embed(
+                        title="🎫 Support Tickets",
+                        description=(
+                            "Need help? Have a question? Want to report something?\n\n"
+                            "Click the button below to open a private ticket with staff!\n\n"
+                            "📋 **Guidelines:**\n"
+                            "• One ticket per issue\n"
+                            "• Be respectful to staff\n"
+                            "• Provide as much detail as possible\n"
+                            "• Don't spam open/close tickets"
+                        ),
+                        color=discord.Color.blurple()
+                    )
+                    ticket_embed.set_footer(text="Tickets are logged for safety purposes")
+                    await ticket_channel.send(embed=ticket_embed, view=TicketOpenView())
+                    created["channels"].append(ticket_channel.id)
+            except Exception as e:
+                print(f"⚠️ Auto ticket setup error: {e}")
+
+        # Auto setup server stats if requested
+        if getattr(bot, 'setup_wants_stats', True):
+            try:
+                existing_stats = discord.utils.get(ctx.guild.categories, name="📊 SERVER STATS 📊")
+                if not existing_stats:
+                    stats_category = await ctx.guild.create_category(
+                        name="📊 SERVER STATS 📊",
+                        position=0
+                    )
+                    await stats_category.set_permissions(ctx.guild.default_role,
+                        connect=False,
+                        send_messages=False,
+                        read_messages=True
+                    )
+
+                    total_members = len([m for m in ctx.guild.members if not m.bot])
+                    total_bots = len([m for m in ctx.guild.members if m.bot])
+                    online_members = len([m for m in ctx.guild.members if not m.bot and m.status != discord.Status.offline])
+                    total_channels = len(ctx.guild.text_channels) + len(ctx.guild.voice_channels)
+                    total_roles = len(ctx.guild.roles) - 1
+
+                    stats = [
+                        f"👥・ Members: {total_members}",
+                        f"🟢・ Online: {online_members}",
+                        f"🤖・ Bots: {total_bots}",
+                        f"💬・ Channels: {total_channels}",
+                        f"🎭・ Roles: {total_roles}",
+                    ]
+
+                    for stat in stats:
+                        stat_channel = await ctx.guild.create_voice_channel(
+                            name=stat,
+                            category=stats_category
+                        )
+                        await stat_channel.set_permissions(ctx.guild.default_role,
+                            connect=False,
+                            view_channel=True
+                        )
+                        created["channels"].append(stat_channel.id)
+
+                    save_state({"stats_category_id": stats_category.id})
+                    bot.stats_category_id = stats_category.id
+                    created["categories"].append(stats_category.id)
+            except Exception as e:
+                print(f"⚠️ Auto stats setup error: {e}")
+
     except Exception as e:
         await progress_msg.edit(content=f"❌ Something went wrong: {str(e)}")
 
@@ -948,77 +1019,6 @@ async def undo(ctx):
 
     except Exception as e:
         await progress_msg.edit(content=f"❌ Something went wrong: {str(e)}")
-
-@bot.command(name="guide")
-async def guide(ctx):
-    embed = discord.Embed(
-        title="🏗️ Architect AI — Commands",
-        description="I build Discord servers from a single sentence!",
-        color=discord.Color.blurple()
-    )
-    embed.add_field(
-        name="!setup",
-        value="Choose a server template to get started\nExample: `!setup` → pick a theme → `!build`",
-        inline=False
-    )
-    embed.add_field(
-        name="!details <extras>",
-        value="Add extra details after picking a template\nExample: `!details for 10 friends who play Valorant`",
-        inline=False
-    )
-    embed.add_field(
-        name="!describe <description>",
-        value="Skip templates and describe your server from scratch\nExample: `!describe a cozy anime server for 5 friends`",
-        inline=False
-    )
-    embed.add_field(
-        name="!confirm",
-        value="Build the server from the generated plan",
-        inline=False
-    )
-    embed.add_field(
-        name="!edit <instruction>",
-        value="Modify your server without rebuilding everything\nExample: `!edit add a movie-night channel`\nExample: `!edit rename general-chat to lobby`\nExample: `!edit add a new category called MUSIC ZONE`",
-        inline=False
-    )
-    embed.add_field(
-        name="!undo",
-        value="Delete everything the bot built and revert to blank",
-        inline=False
-    )
-    embed.add_field(
-        name="!cancel",
-        value="Scrap the current plan without building",
-        inline=False
-    )
-    embed.add_field(name="📖 More Commands", value="`!modguide` — Moderation commands\n`!funguide` — Fun & misc commands", inline=False)
-    embed.add_field(
-        name="💣 !nuke",
-        value="Wipes all channels and roles so you can start fresh with !setup\nOnly the server owner can use this\nExample: `!nuke` → `!confirmnuke` or `!cancelnuke`",
-        inline=False
-    )
-    embed.add_field(
-        name="🎫 !ticket setup",
-        value="Creates the ticket channel so users can open support tickets\nAlso: `!ticket add @user` and `!ticket remove @user`",
-        inline=False
-    )
-    embed.add_field(
-        name="🔄 !redo",
-        value="Rebuilds the server using the last template after an undo\nExample: `!undo` → `!redo` → `!confirmredo`",
-        inline=False
-    )
-    embed.add_field(
-        name="📊 !serverstats",
-        value="Creates a live stats display at the top of your server\nAlso: `!updatestats` to force refresh, `!removestats` to remove",
-        inline=False
-    )
-    embed.add_field(
-        name="🔄 !refreshroles",
-        value="Fixes role buttons after a bot restart or rebuild",
-        inline=False
-    )
-    embed.set_footer(text="Architect AI • Built with discord.py + Groq")
-    await ctx.send(embed=embed, view=GuideView())
 
 @bot.event
 async def on_member_join(member):
