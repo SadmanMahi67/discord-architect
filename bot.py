@@ -217,6 +217,174 @@ def extract_json(text):
             pass
     return None
 
+
+class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
+    def __init__(self, template_key: str, template_data: dict):
+        super().__init__()
+        self.template_key = template_key
+        self.template_data = template_data
+
+    server_name = discord.ui.TextInput(
+        label="Server Name (optional)",
+        placeholder="Leave blank to let AI decide...",
+        required=False,
+        max_length=100
+    )
+
+    member_count = discord.ui.TextInput(
+        label="Number of Members",
+        placeholder="e.g. 5, 10, 50...",
+        required=False,
+        max_length=10
+    )
+
+    extra_details = discord.ui.TextInput(
+        label="Extra Details (optional)",
+        placeholder="e.g. we play Valorant and Minecraft...",
+        required=False,
+        max_length=500,
+        style=discord.TextStyle.paragraph
+    )
+
+    add_tickets = discord.ui.TextInput(
+        label="Add Ticket System? (yes/no)",
+        placeholder="yes or no",
+        required=False,
+        max_length=3,
+        default="yes"
+    )
+
+    add_stats = discord.ui.TextInput(
+        label="Add Server Stats? (yes/no)",
+        placeholder="yes or no",
+        required=False,
+        max_length=3,
+        default="yes"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        template_hint = self.template_data.get("hint", "general server")
+        custom_name = self.server_name.value.strip()
+        members = self.member_count.value.strip()
+        extras = self.extra_details.value.strip()
+        wants_tickets = self.add_tickets.value.strip().lower() != "no"
+        wants_stats = self.add_stats.value.strip().lower() != "no"
+
+        user_input = template_hint or "a general purpose server"
+        if custom_name:
+            user_input += f". Server name should be: {custom_name}"
+        if members:
+            user_input += f". This server is for {members} members"
+        if extras:
+            user_input += f". Extra details: {extras}"
+
+        bot.setup_wants_tickets = wants_tickets
+        bot.setup_wants_stats = wants_stats
+        bot.selected_template = self.template_key
+
+        ctx_like = await interaction.channel.send("🧠 Generating your server plan...")
+
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_input}
+                ]
+            )
+            raw_text = response.choices[0].message.content
+            server_template = extract_json(raw_text)
+
+            if not server_template:
+                await ctx_like.edit(content="❌ Couldn't parse AI response. Try again!")
+                return
+
+            categories_summary = ""
+            for cat in server_template.get("categories", []):
+                channels = cat.get("channels", [])
+                categories_summary += f"\n**{cat['name']}**\n"
+                for i, ch in enumerate(channels):
+                    is_last = i == len(channels) - 1
+                    prefix = "┗" if is_last else "┣"
+                    icon = "🔊" if ch["type"] == "voice" else "💬"
+                    categories_summary += f"{prefix} {icon} {ch['name']}\n"
+
+            if wants_tickets:
+                categories_summary += "\n**🎟️ TICKETS** *(will be added)*\n┗ 💬 ticket system\n"
+            if wants_stats:
+                categories_summary += "\n**📊 SERVER STATS** *(will be added)*\n┗ 📈 live stats channels\n"
+
+            all_roles = server_template.get("roles", [])
+            staff_roles = [r["name"] for r in all_roles if r.get("type") in ["admin", "moderator", "member"]]
+            decorative_roles = [r["name"] for r in all_roles if r.get("type") == "decorative"]
+            color_roles = [r["name"] for r in all_roles if r.get("type") == "color"]
+
+            embed = discord.Embed(
+                title=f"🏗️ {server_template.get('server_name', 'Your Server')} — Ready to Build!",
+                color=discord.Color.blue()
+            )
+            embed.add_field(
+                name="📁 Channels & Categories",
+                value=categories_summary[:1024] if categories_summary else "None",
+                inline=False
+            )
+            embed.add_field(
+                name="👑 Staff Roles",
+                value=", ".join(staff_roles) if staff_roles else "None",
+                inline=True
+            )
+            embed.add_field(
+                name="🎭 Identity Roles",
+                value=", ".join(decorative_roles) if decorative_roles else "None",
+                inline=True
+            )
+            embed.add_field(
+                name="🎨 Color Roles",
+                value=", ".join(color_roles) if color_roles else "None",
+                inline=True
+            )
+
+            bot.pending_template = server_template
+
+            await ctx_like.edit(
+                content=None,
+                embed=embed,
+                view=ConfirmBuildView()
+            )
+
+        except Exception as e:
+            await ctx_like.edit(content=f"❌ Error: {str(e)}")
+
+
+class ConfirmBuildView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="✅ Build Server", style=discord.ButtonStyle.green, custom_id="confirm_build")
+    async def confirm_build(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+        ctx = await bot.get_context(interaction.message)
+        ctx.author = interaction.user
+        ctx.guild = interaction.guild
+        ctx.channel = interaction.channel
+        await ctx.invoke(bot.get_command('confirm'))
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.red, custom_id="cancel_build")
+    async def cancel_build(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bot.pending_template = None
+        embed = discord.Embed(
+            title="❌ Cancelled",
+            description="No changes were made. Run `!setup` again whenever you're ready!",
+            color=discord.Color.orange()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
 class TemplateButton(discord.ui.Button):
     def __init__(self, key: str, data: dict):
         super().__init__(
@@ -228,24 +396,13 @@ class TemplateButton(discord.ui.Button):
         self.data = data
 
     async def callback(self, interaction: discord.Interaction):
-        bot.selected_template = self.key
-
         if self.key == "custom":
-            embed = discord.Embed(
-                title="🎲 Custom Server",
-                description="Describe your server in detail and I'll build it for you!",
-                color=discord.Color.blurple()
-            )
-            embed.set_footer(text="Type !describe <your description> to continue")
-            await interaction.response.edit_message(embed=embed, view=None)
+            modal = SetupModal("custom", {"hint": None})
+            modal.title = "🎲 Custom Server Setup"
         else:
-            embed = discord.Embed(
-                title=f"{self.data['emoji']} {self.data['label']} Template Selected!",
-                description=f"Any extra details to add? For example: number of members, specific games, topics etc.\n\nOr type `!build` to generate with defaults!",
-                color=discord.Color.blurple()
-            )
-            embed.set_footer(text=f"Type !details <your extras> or !build to continue")
-            await interaction.response.edit_message(embed=embed, view=None)
+            modal = SetupModal(self.key, self.data)
+            modal.title = f"{self.data['emoji']} {self.data['label']} Server Setup"
+        await interaction.response.send_modal(modal)
 
 class TemplateView(discord.ui.View):
     def __init__(self):
@@ -337,7 +494,9 @@ async def on_ready():
         TemplateView(),
         TicketOpenView(),
         TicketCloseView(),
-        TicketConfirmCloseView()
+        TicketConfirmCloseView(),
+        GuideView(),
+        ConfirmBuildView()
     ]
     for view in views_to_register:
         try:
@@ -461,7 +620,7 @@ async def generate_server_plan(ctx, user_input: str):
 async def setup(ctx):
     embed = discord.Embed(
         title="🏗️ Architect AI — Choose a Template",
-        description="Pick a theme to get started! The AI will customize it based on your choice.",
+        description="Pick a theme to get started! A setup popup will appear for customization.",
         color=discord.Color.blurple()
     )
     for key, data in SERVER_TEMPLATES.items():
@@ -859,7 +1018,7 @@ async def guide(ctx):
         inline=False
     )
     embed.set_footer(text="Architect AI • Built with discord.py + Groq")
-    await ctx.send(embed=embed)
+    await ctx.send(embed=embed, view=GuideView())
 
 @bot.event
 async def on_member_join(member):
@@ -1454,111 +1613,59 @@ async def topic(ctx):
 
 # ── GUIDE COMMANDS ────────────────────────────────────────────────────────────────────────────
 
-@bot.command()
-async def modguide(ctx):
-    embed = discord.Embed(
-        title="🔨 Architect AI — Mod Commands",
-        description="Staff-only moderation commands",
-        color=discord.Color.red()
-    )
-    embed.add_field(
-        name="!promote @user mod/admin",
-        value="Promotes a user to Mod or Admin\nExample: `!promote @John mod`",
-        inline=False
-    )
-    embed.add_field(
-        name="!demote @user",
-        value="Removes all staff roles from a user\nExample: `!demote @John`",
-        inline=False
-    )
-    embed.add_field(
-        name="!kick @user reason",
-        value="Kicks a member from the server\nExample: `!kick @John breaking rules`",
-        inline=False
-    )
-    embed.add_field(
-        name="!ban @user reason",
-        value="Permanently bans a member\nExample: `!ban @John spamming`",
-        inline=False
-    )
-    embed.add_field(
-        name="!timeout @user duration reason",
-        value="Mutes a member for a duration\nDuration formats: `30s` `10m` `2h` `1d`\nExample: `!timeout @John 10m spamming`",
-        inline=False
-    )
-    embed.add_field(
-        name="!untimeout @user",
-        value="Removes a timeout early\nExample: `!untimeout @John`",
-        inline=False
-    )
-    embed.add_field(
-        name="!warn @user reason",
-        value="Sends user a DM warning and logs it\nExample: `!warn @John please follow the rules`",
-        inline=False
-    )
-    embed.add_field(
-        name="!addrole @user role name",
-        value="Manually gives a role to a user\nExample: `!addrole @John Moderator`",
-        inline=False
-    )
-    embed.add_field(
-        name="!removerole @user role name",
-        value="Manually removes a role from a user\nExample: `!removerole @John Moderator`",
-        inline=False
-    )
-    embed.set_footer(text="All mod actions are logged in #mod-logs • !guide for setup • !funguide for fun commands")
-    await ctx.send(embed=embed)
+class GuideView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
 
+    @discord.ui.button(label="🏗️ Setup", style=discord.ButtonStyle.primary, custom_id="guide_setup")
+    async def setup_guide(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🏗️ Setup Commands",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="!setup", value="Start building your server", inline=False)
+        embed.add_field(name="!edit <instruction>", value="Modify server without rebuilding\n`!edit add a movie-night channel`", inline=False)
+        embed.add_field(name="!undo / !redo", value="Undo or redo the last build", inline=False)
+        embed.add_field(name="!nuke", value="Wipe server clean to start fresh\nOwner only", inline=False)
+        embed.add_field(name="!refreshroles", value="Fix role buttons after bot restart", inline=False)
+        embed.add_field(name="!serverstats", value="Add live stats to your server", inline=False)
+        embed.add_field(name="!ticket setup", value="Add a ticket system", inline=False)
+        embed.set_footer(text="Architect AI • !guide for main menu")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.command()
-async def funguide(ctx):
-    embed = discord.Embed(
-        title="🎮 Architect AI — Fun Commands",
-        description="Fun and misc commands for everyone",
-        color=discord.Color.green()
-    )
-    embed.add_field(
-        name="!coinflip",
-        value="Flips a coin\nExample: `!coinflip`",
-        inline=False
-    )
-    embed.add_field(
-        name="!pick option1 option2 ...",
-        value="Randomly picks one of your options\nExample: `!pick pizza burger sushi`",
-        inline=False
-    )
-    embed.add_field(
-        name='!poll "question" "option1" "option2"',
-        value="Creates a poll with reactions\nExample: `!poll \"Best game?\" \"Valorant\" \"Minecraft\"`",
-        inline=False
-    )
-    embed.add_field(
-        name="!quote",
-        value="Gets an AI-generated inspiring quote\nExample: `!quote`",
-        inline=False
-    )
-    embed.add_field(
-        name="!topic",
-        value="Gets an AI-generated conversation starter\nExample: `!topic`",
-        inline=False
-    )
-    embed.add_field(
-        name="🎉 !giveaway <duration> <winners> <prize>",
-        value="Starts a giveaway\nExample: `!giveaway 1h 1 Steam Key`\nExample: `!giveaway 30m 2 Nitro`",
-        inline=False
-    )
-    embed.add_field(
-        name="🎲 !greroll <message_id>",
-        value="Rerolls a giveaway winner\nExample: `!greroll 123456789`",
-        inline=False
-    )
-    embed.add_field(
-        name="⏹️ !gend <message_id>",
-        value="Ends a giveaway early\nExample: `!gend 123456789`",
-        inline=False
-    )
-    embed.set_footer(text="Use !guide for setup commands • !modguide for mod commands")
-    await ctx.send(embed=embed)
+    @discord.ui.button(label="🔨 Moderation", style=discord.ButtonStyle.danger, custom_id="guide_mod")
+    async def mod_guide(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🔨 Moderation Commands",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="!promote @user mod/admin", value="Give staff role", inline=False)
+        embed.add_field(name="!demote @user", value="Remove staff roles", inline=False)
+        embed.add_field(name="!kick @user reason", value="Kick a member", inline=False)
+        embed.add_field(name="!ban @user reason", value="Ban a member", inline=False)
+        embed.add_field(name="!timeout @user 10m reason", value="Mute a member temporarily", inline=False)
+        embed.add_field(name="!untimeout @user", value="Remove a timeout", inline=False)
+        embed.add_field(name="!warn @user reason", value="Warn a member via DM", inline=False)
+        embed.add_field(name="!addrole / !removerole", value="Manually add or remove roles", inline=False)
+        embed.set_footer(text="All actions logged in #mod-logs • !guide for main menu")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🎮 Fun & Levels", style=discord.ButtonStyle.success, custom_id="guide_fun")
+    async def fun_guide(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🎮 Fun & Level Commands",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="!rank @user", value="See your XP rank card", inline=False)
+        embed.add_field(name="!leaderboard", value="Top 10 most active members", inline=False)
+        embed.add_field(name="!giveaway 1h 1 Prize", value="Start a giveaway", inline=False)
+        embed.add_field(name='!poll "Q" "A" "B"', value="Create a poll", inline=False)
+        embed.add_field(name="!pick opt1 opt2", value="Randomly pick an option", inline=False)
+        embed.add_field(name="!coinflip", value="Flip a coin", inline=False)
+        embed.add_field(name="!quote", value="Get an AI quote", inline=False)
+        embed.add_field(name="!topic", value="Get a conversation starter", inline=False)
+        embed.set_footer(text="Architect AI • !guide for main menu")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.command()
@@ -2598,7 +2705,7 @@ class GiveawayView(discord.ui.View):
     @discord.ui.button(
         label="🎉 Enter Giveaway",
         style=discord.ButtonStyle.green,
-        custom_id="enter_giveaway"
+        custom_id="enter_giveaway_btn"
     )
     async def enter_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
