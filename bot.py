@@ -74,6 +74,40 @@ def save_levels(data: dict):
     with open(LEVELS_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
+def is_staff(member: discord.Member) -> bool:
+    staff_role_names = ["Admin", "Moderator", "Administrator", "Mod", "Staff"]
+    for role in member.roles:
+        if any(name.lower() in role.name.lower() for name in staff_role_names):
+            return True
+    if member.guild_permissions.kick_members:
+        return True
+    if member.guild_permissions.ban_members:
+        return True
+    if member.guild_permissions.manage_guild:
+        return True
+    if member == member.guild.owner:
+        return True
+    return False
+
+def is_owner(member: discord.Member) -> bool:
+    return member == member.guild.owner
+
+def owner_only():
+    async def predicate(ctx):
+        if not is_owner(ctx.author):
+            await ctx.send("❌ Only the server owner can use this command!")
+            return False
+        return True
+    return commands.check(predicate)
+
+def staff_only():
+    async def predicate(ctx):
+        if not is_staff(ctx.author):
+            await ctx.send("❌ You need staff permissions to use this command!")
+            return False
+        return True
+    return commands.check(predicate)
+
 SERVER_TEMPLATES = {
     "gaming": {
         "emoji": "🎮",
@@ -1201,40 +1235,6 @@ async def edit(ctx):
 # ── MOD LOG HELPER ───────────────────────────────────────────────────────────────────────────────
 def is_higher_role(moderator: discord.Member, target: discord.Member) -> bool:
     return moderator.top_role > target.top_role
-
-def is_staff(member: discord.Member) -> bool:
-    staff_role_names = ["Admin", "Moderator", "Administrator", "Mod", "Staff"]
-    for role in member.roles:
-        if any(name.lower() in role.name.lower() for name in staff_role_names):
-            return True
-    if member.guild_permissions.kick_members:
-        return True
-    if member.guild_permissions.ban_members:
-        return True
-    if member.guild_permissions.manage_guild:
-        return True
-    if member == member.guild.owner:
-        return True
-    return False
-
-def is_owner(member: discord.Member) -> bool:
-    return member == member.guild.owner
-
-def owner_only():
-    async def predicate(ctx):
-        if not is_owner(ctx.author):
-            await ctx.send("❌ Only the server owner can use this command!")
-            return False
-        return True
-    return commands.check(predicate)
-
-def staff_only():
-    async def predicate(ctx):
-        if not is_staff(ctx.author):
-            await ctx.send("❌ You need staff permissions to use this command!")
-            return False
-        return True
-    return commands.check(predicate)
 
 async def log_mod_action(guild, action: str, moderator, target, reason: str = "No reason provided"):
     log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
