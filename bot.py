@@ -281,22 +281,22 @@ class RoleView(discord.ui.View):
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
     bot.add_view(RoleView([]))
+    bot.add_view(TemplateView())
     bot.add_view(TicketOpenView())
     bot.add_view(TicketCloseView())
     bot.add_view(TicketConfirmCloseView())
-    # Init XP cooldown tracker
-    bot.xp_cooldowns = {}
-    # Load saved state so member role survives restarts
-    state = load_state()
-    if "member_role_id" in state:
-        bot.member_role_id = state["member_role_id"]
-        print(f"✅ Loaded member role ID: {bot.member_role_id}")
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
             name="!guide for commands"
         )
     )
+    state = load_state()
+    if "member_role_id" in state:
+        bot.member_role_id = state["member_role_id"]
+        print(f"✅ Loaded member role ID: {bot.member_role_id}")
+    bot.xp_cooldowns = {}
+    print("✅ All systems ready!")
 
 @bot.command()
 async def hello(ctx):
@@ -1729,9 +1729,9 @@ class TicketCloseView(discord.ui.View):
 
 class TicketConfirmCloseView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=30)
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="✅ Yes, Close It", style=discord.ButtonStyle.red, custom_id="confirm_close")
+    @discord.ui.button(label="✅ Yes, Close It", style=discord.ButtonStyle.red, custom_id="confirm_close_ticket")
     async def confirm_close(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel = interaction.channel
         guild = interaction.guild
@@ -1768,7 +1768,7 @@ class TicketConfirmCloseView(discord.ui.View):
         await asyncio.sleep(2)
         await channel.delete()
 
-    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary, custom_id="cancel_close")
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary, custom_id="cancel_close_ticket")
     async def cancel_close(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("✅ Ticket close cancelled!", ephemeral=True)
 
