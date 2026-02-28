@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord.ext import tasks
 from dotenv import load_dotenv
 import os
 from groq import Groq
@@ -310,7 +311,11 @@ async def on_ready():
     if "member_role_id" in state:
         bot.member_role_id = state["member_role_id"]
         print(f"✅ Loaded member role ID: {bot.member_role_id}")
+    if "stats_category_id" in state and state["stats_category_id"]:
+        bot.stats_category_id = state["stats_category_id"]
+        print(f"✅ Loaded stats category ID: {bot.stats_category_id}")
 
+    auto_update_stats.start()
     print("✅ All systems ready!")
 
 @bot.command()
@@ -745,6 +750,11 @@ async def guide(ctx):
     embed.add_field(
         name="🔄 !redo",
         value="Rebuilds the server using the last template after an undo\nExample: `!undo` → `!redo` → `!confirmredo`",
+        inline=False
+    )
+    embed.add_field(
+        name="📊 !serverstats",
+        value="Creates a live stats display at the top of your server\nAlso: `!updatestats` to force refresh, `!removestats` to remove",
         inline=False
     )
     embed.set_footer(text="Architect AI • Built with discord.py + Groq")
@@ -2278,6 +2288,147 @@ async def cancelredo(ctx):
         return
     bot.redo_pending = False
     await ctx.send("✅ Redo cancelled!")
+
+
+# ── SERVER STATS ───────────────────────────────────────────────────────────────────────────
+
+async def update_server_stats(guild: discord.Guild):
+    try:
+        state = load_state()
+        category_id = state.get("stats_category_id") or getattr(bot, 'stats_category_id', None)
+        if not category_id:
+            return
+
+        category = guild.get_channel(int(category_id))
+        if not category:
+            return
+
+        total_members = len([m for m in guild.members if not m.bot])
+        total_bots = len([m for m in guild.members if m.bot])
+        online_members = len([m for m in guild.members if not m.bot and m.status != discord.Status.offline])
+        total_channels = len(guild.text_channels) + len(guild.voice_channels)
+        total_roles = len(guild.roles) - 1
+
+        stats = [
+            f"👥・ Members: {total_members}",
+            f"🟢・ Online: {online_members}",
+            f"🤖・ Bots: {total_bots}",
+            f"💬・ Channels: {total_channels}",
+            f"🎭・ Roles: {total_roles}",
+            f"🏠・ Server: {guild.name[:15]}",
+        ]
+
+        channels = [c for c in category.channels]
+        for i, channel in enumerate(channels):
+            if i < len(stats):
+                await channel.edit(name=stats[i])
+
+    except Exception as e:
+        print(f"⚠️ Stats update error: {e}")
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def serverstats(ctx):
+    guild = ctx.guild
+    progress = await ctx.send("📊 Setting up server stats...")
+
+    try:
+        # Create stats category
+        existing = discord.utils.get(guild.categories, name="📊 SERVER STATS 📊")
+        if existing:
+            await ctx.send("❌ Server stats already exists! Use `!updatestats` to refresh.")
+            return
+
+        # Make category visible but channels read only
+        category = await guild.create_category(
+            name="📊 SERVER STATS 📊",
+            position=0
+        )
+
+        # Hide from everyone except viewing
+        await category.set_permissions(guild.default_role,
+            connect=False,
+            send_messages=False,
+            read_messages=True
+        )
+
+        # Count stats
+        total_members = len([m for m in guild.members if not m.bot])
+        total_bots = len([m for m in guild.members if m.bot])
+        online_members = len([m for m in guild.members if not m.bot and m.status != discord.Status.offline])
+        total_channels = len(guild.text_channels) + len(guild.voice_channels)
+        total_roles = len(guild.roles) - 1  # exclude @everyone
+
+        # Create stat channels
+        stats = [
+            f"👥・ Members: {total_members}",
+            f"🟢・ Online: {online_members}",
+            f"🤖・ Bots: {total_bots}",
+            f"💬・ Channels: {total_channels}",
+            f"🎭・ Roles: {total_roles}",
+            f"🏠・ Server: {guild.name[:15]}",
+        ]
+
+        for stat in stats:
+            channel = await guild.create_voice_channel(
+                name=stat,
+                category=category
+            )
+            await channel.set_permissions(guild.default_role,
+                connect=False,
+                view_channel=True
+            )
+
+        # Save category id for updates
+        save_state({"stats_category_id": category.id})
+        bot.stats_category_id = category.id
+
+        embed = discord.Embed(
+            title="📊 Server Stats Setup!",
+            description=(
+                "Stats channels created at the top of your server!\n\n"
+                "They update automatically every 10 minutes.\n"
+                "Use `!updatestats` to force an update anytime."
+            ),
+            color=discord.Color.green()
+        )
+        await progress.edit(content=None, embed=embed)
+
+    except Exception as e:
+        await progress.edit(content=f"❌ Error: {str(e)}")
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def updatestats(ctx):
+    await update_server_stats(ctx.guild)
+    await ctx.send("✅ Server stats updated!", delete_after=3)
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def removestats(ctx):
+    guild = ctx.guild
+    category = discord.utils.get(guild.categories, name="📊 SERVER STATS 📊")
+    if not category:
+        await ctx.send("❌ No stats category found!")
+        return
+    for channel in category.channels:
+        await channel.delete()
+    await category.delete()
+    save_state({"stats_category_id": None})
+    await ctx.send("✅ Server stats removed!")
+
+
+@tasks.loop(minutes=10)
+async def auto_update_stats():
+    for guild in bot.guilds:
+        await update_server_stats(guild)
+
+@auto_update_stats.before_loop
+async def before_stats():
+    await bot.wait_until_ready()
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
