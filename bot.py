@@ -577,6 +577,7 @@ async def on_ready():
     # Initialize cooldowns first before anything else
     bot.xp_cooldowns = {}
     bot.spam_tracker = {}
+    bot.automod_cache = {}
 
     state = load_state()
 
@@ -627,6 +628,11 @@ async def on_guild_available(guild):
         member_role_id = data.get("member_role_id")
         if member_role_id:
             bot.member_role_id = member_role_id
+
+        # Cache automod config
+        automod_config = data.get("automod", {})
+        if automod_config:
+            bot.automod_cache[str(guild.id)] = automod_config
 
     except Exception as e:
         print(f"⚠️ Could not load data for {guild.name}: {e}")
@@ -3107,56 +3113,18 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
-    # ── AUTO-MOD ────────────────────────────────────────────────────
-    guild_id = str(message.guild.id)
-    data = await db_load(guild_id)
-    config = data.get("automod", {})
+    # ── AUTO-MOD ──────────────────────────────────────────
+    if not is_staff(message.author) and message.author != message.guild.owner:
+        guild_id = str(message.guild.id)
+        config = bot.automod_cache.get(guild_id, {})
 
-    if config.get("enabled") and not message.author.guild_permissions.kick_members:
-        content = message.content
-        member = message.author
-        flagged = False
-        flag_reason = ""
+        if config.get("enabled"):
+            content = message.content
+            member = message.author
+            flagged = False
+            flag_reason = ""
 
-        # 1. Spam detection — 5 messages in 5 seconds
-        if config.get("block_spam", True):
-            spam_key = f"{guild_id}_{member.id}"
-            now = asyncio.get_event_loop().time()
-            if spam_key not in bot.spam_tracker:
-                bot.spam_tracker[spam_key] = []
-            bot.spam_tracker[spam_key].append(now)
-            bot.spam_tracker[spam_key] = [
-                t for t in bot.spam_tracker[spam_key] if now - t < 5
-            ]
-            if len(bot.spam_tracker[spam_key]) >= 5:
-                flagged = True
-                flag_reason = "Spam detected"
-                bot.spam_tracker[spam_key] = []
-
-        # 2. Caps spam — 80%+ caps in messages over 8 chars
-        if not flagged and config.get("block_caps", True):
-            if len(content) > 8:
-                caps_ratio = sum(1 for c in content if c.isupper()) / len(content)
-                if caps_ratio > 0.8:
-                    flagged = True
-                    flag_reason = "Excessive caps"
-
-        # 3. Link detection
-        if not flagged and config.get("block_links", False):
-            import re as _re
-            url_pattern = _re.compile(r'https?://\S+|www\.\S+|discord\.gg/\S+')
-            if url_pattern.search(content):
-                flagged = True
-                flag_reason = "Links not allowed"
-
-        # 4. Mass mentions — 5+ pings in one message
-        if not flagged and config.get("block_mentions", True):
-            if len(message.mentions) >= 5 or message.mention_everyone:
-                flagged = True
-                flag_reason = "Mass mentions"
-
-        # 5. Built-in slur list (always active when automod is on)
-        if not flagged:
+            # 1. Slur filter — always on when automod enabled
             content_lower = content.lower()
             for word in BLOCKED_WORDS:
                 if word in content_lower:
@@ -3164,29 +3132,64 @@ async def on_message(message):
                     flag_reason = "Slur detected"
                     break
 
-        # 6. Custom banned words
-        if not flagged:
-            banned_words = config.get("banned_words", [])
-            content_lower = content.lower()
-            for word in banned_words:
-                if word in content_lower:
-                    flagged = True
-                    flag_reason = "Banned word"
-                    break
+            # 2. Custom banned words
+            if not flagged:
+                for word in config.get("banned_words", []):
+                    if word in content_lower:
+                        flagged = True
+                        flag_reason = "Banned word"
+                        break
 
-        if flagged:
-            try:
-                await message.delete()
-                await message.channel.send(
-                    f"⚠️ {member.mention} — {flag_reason}!",
-                    delete_after=5
-                )
-                await automod_warn(message.guild, member, flag_reason)
-            except:
-                pass
-            await bot.process_commands(message)
-            return
-    # ── END AUTO-MOD ──────────────────────────────────────────────────
+            # 3. Spam — 5 messages in 5 seconds
+            if not flagged and config.get("block_spam", True):
+                spam_key = f"{guild_id}_{member.id}"
+                now = asyncio.get_event_loop().time()
+                if spam_key not in bot.spam_tracker:
+                    bot.spam_tracker[spam_key] = []
+                bot.spam_tracker[spam_key].append(now)
+                bot.spam_tracker[spam_key] = [
+                    t for t in bot.spam_tracker[spam_key] if now - t < 5
+                ]
+                if len(bot.spam_tracker[spam_key]) >= 5:
+                    flagged = True
+                    flag_reason = "Spam detected"
+                    bot.spam_tracker[spam_key] = []
+
+            # 4. Caps spam — 80%+ caps in messages over 8 chars
+            if not flagged and config.get("block_caps", True):
+                if len(content) > 8:
+                    caps_ratio = sum(1 for c in content if c.isupper()) / len(content)
+                    if caps_ratio > 0.8:
+                        flagged = True
+                        flag_reason = "Excessive caps"
+
+            # 5. Links
+            if not flagged and config.get("block_links", False):
+                import re as _re
+                url_pattern = _re.compile(r'https?://\S+|www\.\S+|discord\.gg/\S+')
+                if url_pattern.search(content):
+                    flagged = True
+                    flag_reason = "Links not allowed"
+
+            # 6. Mass mentions
+            if not flagged and config.get("block_mentions", True):
+                if len(message.mentions) >= 5 or message.mention_everyone:
+                    flagged = True
+                    flag_reason = "Mass mentions"
+
+            if flagged:
+                try:
+                    await message.delete()
+                    await message.channel.send(
+                        f"⚠️ {member.mention} — {flag_reason}!",
+                        delete_after=5
+                    )
+                    await automod_warn(message.guild, member, flag_reason)
+                except:
+                    pass
+                await bot.process_commands(message)
+                return
+    # ── END AUTO-MOD ──────────────────────────────────────
 
     guild_id = str(message.guild.id)
     user_id = str(message.author.id)
@@ -3828,6 +3831,7 @@ class AutoModMenuView(discord.ui.View):
         config = data.get("automod", self.config)
         config["enabled"] = True
         await db_save(guild_id, {"automod": config})
+        bot.automod_cache[guild_id] = config
         embed = discord.Embed(
             title="🛡️ Auto-Mod Enabled!",
             description="Auto-mod is now active and watching messages.",
@@ -3842,6 +3846,7 @@ class AutoModMenuView(discord.ui.View):
         config = data.get("automod", self.config)
         config["enabled"] = False
         await db_save(guild_id, {"automod": config})
+        bot.automod_cache[guild_id] = config
         embed = discord.Embed(
             title="🛡️ Auto-Mod Disabled!",
             description="Auto-mod has been turned off.",
@@ -3940,6 +3945,7 @@ class AutoModConfigModal(discord.ui.Modal, title="⚙️ Configure Auto-Mod"):
             config["warn_threshold"] = 3
 
         await db_save(guild_id, {"automod": config})
+        bot.automod_cache[guild_id] = config
 
         embed = discord.Embed(
             title="✅ Auto-Mod Configured!",
@@ -4049,6 +4055,7 @@ async def automod(ctx):
     embed.add_field(name="⚠️ Warn Threshold", value=str(config.get("warn_threshold", 3)), inline=True)
     embed.add_field(name="📝 Custom Banned Words", value=str(banned_count), inline=True)
     embed.set_footer(text="Use the buttons below to configure")
+    bot.automod_cache[guild_id] = config
     await ctx.send(embed=embed, view=AutoModMenuView(config))
 
 
