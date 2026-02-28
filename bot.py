@@ -195,7 +195,7 @@ class TemplateButton(discord.ui.Button):
         super().__init__(
             label=f"{data['emoji']} {data['label']}",
             style=discord.ButtonStyle.secondary,
-            custom_id=f"template_{key}"
+            custom_id=f"template_btn_{key}"
         )
         self.key = key
         self.data = data
@@ -222,7 +222,7 @@ class TemplateButton(discord.ui.Button):
 
 class TemplateView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         for key, data in SERVER_TEMPLATES.items():
             self.add_item(TemplateButton(key, data))
 
@@ -280,22 +280,36 @@ class RoleView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
-    bot.add_view(RoleView([]))
-    bot.add_view(TemplateView())
-    bot.add_view(TicketOpenView())
-    bot.add_view(TicketCloseView())
-    bot.add_view(TicketConfirmCloseView())
+
+    # Initialize cooldowns first before anything else
+    bot.xp_cooldowns = {}
+
+    # Register views safely one by one
+    views_to_register = [
+        RoleView([]),
+        TemplateView(),
+        TicketOpenView(),
+        TicketCloseView(),
+        TicketConfirmCloseView()
+    ]
+    for view in views_to_register:
+        try:
+            bot.add_view(view)
+        except Exception as e:
+            print(f"⚠️ Could not register view {view.__class__.__name__}: {e}")
+
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
             name="!guide for commands"
         )
     )
+
     state = load_state()
     if "member_role_id" in state:
         bot.member_role_id = state["member_role_id"]
         print(f"✅ Loaded member role ID: {bot.member_role_id}")
-    bot.xp_cooldowns = {}
+
     print("✅ All systems ready!")
 
 @bot.command()
