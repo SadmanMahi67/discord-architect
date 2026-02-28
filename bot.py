@@ -878,7 +878,7 @@ async def confirm(ctx):
         embed.add_field(name="👑 Your Role", value="Admin — you have full control!", inline=False)
         embed.add_field(
             name="✏️ Want to make changes?",
-            value="Use `!edit` to modify without rebuilding!\nExamples:\n`!edit add a movie-night channel`\n`!edit rename general-chat to lobby`\n`!edit add a new category called MUSIC ZONE`",
+            value="Use `!edit` to open the editor!\nAdd channels, categories, roles, change colors, edit topics and more!",
             inline=False
         )
         embed.set_footer(text="Type !undo to revert everything • !guide to see all commands")
@@ -2273,7 +2273,7 @@ class GuideView(discord.ui.View):
             color=discord.Color.blue()
         )
         embed.add_field(name="!setup", value="Start building your server", inline=False)
-        embed.add_field(name="!edit <instruction>", value="Modify server without rebuilding\n`!edit add a movie-night channel`", inline=False)
+        embed.add_field(name="!edit", value="Open the server editor — add channels, roles, rename, delete and more!", inline=False)
         embed.add_field(name="!undo / !redo", value="Undo or redo the last build", inline=False)
         embed.add_field(name="!nuke", value="Wipe server clean to start fresh\nOwner only", inline=False)
         embed.add_field(name="!refreshroles", value="Fix role buttons after bot restart", inline=False)
