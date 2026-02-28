@@ -1003,6 +1003,29 @@ async def undo(ctx):
                 deleted["roles"] += 1
                 await asyncio.sleep(0.5)
 
+        # Also clean up stats category if it exists
+        stats_category = discord.utils.get(guild.categories, name="📊 SERVER STATS 📊")
+        if stats_category:
+            for channel in stats_category.channels:
+                await channel.delete()
+                await asyncio.sleep(0.4)
+            await stats_category.delete()
+            save_state({"stats_category_id": None})
+            bot.stats_category_id = None
+
+        # Also clean up tickets category if it exists
+        tickets_category = discord.utils.get(guild.categories, name="🎫 TICKETS")
+        if tickets_category:
+            for channel in tickets_category.channels:
+                await channel.delete()
+                await asyncio.sleep(0.4)
+            await tickets_category.delete()
+
+        # Also delete the tickets channel if it exists
+        tickets_channel = discord.utils.get(guild.text_channels, name="「🎫」tickets")
+        if tickets_channel:
+            await tickets_channel.delete()
+
         # Clear the saved state
         bot.last_build = None
 
