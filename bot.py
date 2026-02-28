@@ -2067,6 +2067,59 @@ async def rank(ctx, member: discord.Member = None):
         await thinking.edit(content=None, embed=embed)
 
 
+@bot.command()
+async def leaderboard(ctx):
+    try:
+        guild_id = str(ctx.guild.id)
+        levels = load_levels()
+
+        if guild_id not in levels or not levels[guild_id]:
+            await ctx.send("❌ No one has earned XP yet! Start chatting!")
+            return
+
+        guild_data = levels[guild_id]
+
+        # Filter out users with 0 XP
+        active_users = {uid: data for uid, data in guild_data.items() if data.get("xp", 0) > 0}
+
+        if not active_users:
+            await ctx.send("❌ No one has earned XP yet! Start chatting!")
+            return
+
+        sorted_users = sorted(active_users.items(), key=lambda x: x[1]["xp"], reverse=True)[:10]
+
+        embed = discord.Embed(
+            title=f"🏆 {ctx.guild.name} Leaderboard",
+            color=discord.Color.gold()
+        )
+
+        medals = ["🥇", "🥈", "🥉"]
+        description = ""
+        for i, (user_id, data) in enumerate(sorted_users):
+            try:
+                member = ctx.guild.get_member(int(user_id))
+                name = member.display_name if member else f"Unknown User"
+                level = get_level_from_xp(data.get("xp", 0))
+                xp = data.get("xp", 0)
+                prestige = data.get("prestige", 0)
+                badge = get_prestige_badge(prestige) if prestige > 0 else ""
+                medal = medals[i] if i < 3 else f"`#{i+1}`"
+                description += f"{medal} **{name}** {badge} — Level {level} ({xp} XP)\n"
+            except:
+                continue
+
+        if not description:
+            await ctx.send("❌ Couldn't load leaderboard data!")
+            return
+
+        embed.description = description
+        embed.set_footer(text="Use !rank to see your detailed stats")
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        await ctx.send(f"❌ Leaderboard error: {str(e)}")
+
+
 @bot.event
 async def on_message(message):
     # Ignore bots and DMs
