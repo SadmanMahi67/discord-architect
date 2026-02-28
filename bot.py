@@ -394,7 +394,7 @@ class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
 
 class ConfirmBuildView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="✅ Build Server", style=discord.ButtonStyle.green, custom_id="confirm_build")
     async def confirm_build(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2304,7 +2304,7 @@ class EditTopicModal(discord.ui.Modal, title="📝 Edit Channel Topic"):
 
 class GuideView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="🏗️ Setup", style=discord.ButtonStyle.primary, custom_id="guide_setup")
     async def setup_guide(self, interaction: discord.Interaction, button: discord.ui.Button):
