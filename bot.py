@@ -609,6 +609,7 @@ async def confirm(ctx):
 
         # Step 5 — Save state for undo
         bot.last_build = created
+        bot.last_template = template
         bot.pending_template = None
 
         embed = discord.Embed(
@@ -739,6 +740,11 @@ async def guide(ctx):
     embed.add_field(
         name="🎫 !ticket setup",
         value="Creates the ticket channel so users can open support tickets\nAlso: `!ticket add @user` and `!ticket remove @user`",
+        inline=False
+    )
+    embed.add_field(
+        name="🔄 !redo",
+        value="Rebuilds the server using the last template after an undo\nExample: `!undo` → `!redo` → `!confirmredo`",
         inline=False
     )
     embed.set_footer(text="Architect AI • Built with discord.py + Groq")
@@ -2178,6 +2184,47 @@ async def on_message(message):
             save_levels(levels)
 
     await bot.process_commands(message)
+
+
+@bot.command()
+async def redo(ctx):
+    if not hasattr(bot, 'last_template') or bot.last_template is None:
+        await ctx.send("❌ Nothing to redo! There's no previous server template saved.")
+        return
+
+    embed = discord.Embed(
+        title="🔄 Redo Last Build?",
+        description=(
+            "This will rebuild your server using the last template.\n\n"
+            f"**Server:** {bot.last_template.get('server_name', 'Unknown')}\n\n"
+            "Type `!confirmredo` to proceed or `!cancelredo` to cancel."
+        ),
+        color=discord.Color.orange()
+    )
+    await ctx.send(embed=embed)
+    bot.redo_pending = True
+
+
+@bot.command()
+async def confirmredo(ctx):
+    if not hasattr(bot, 'redo_pending') or not bot.redo_pending:
+        await ctx.send("❌ No redo pending! Run `!redo` first.")
+        return
+
+    bot.redo_pending = False
+    bot.pending_template = bot.last_template
+    bot.pending_ctx = ctx
+    await ctx.send("🔄 Restoring last build...")
+    await ctx.invoke(bot.get_command('confirm'))
+
+
+@bot.command()
+async def cancelredo(ctx):
+    if not hasattr(bot, 'redo_pending') or not bot.redo_pending:
+        await ctx.send("❌ No redo pending!")
+        return
+    bot.redo_pending = False
+    await ctx.send("✅ Redo cancelled!")
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
