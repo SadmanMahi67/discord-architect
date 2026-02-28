@@ -617,6 +617,7 @@ async def generate_server_plan(ctx, user_input: str):
         await thinking_msg.edit(content=f"❌ Error: {str(e)}")
 
 @bot.command()
+@owner_only()
 async def setup(ctx):
     embed = discord.Embed(
         title="🏗️ Architect AI — Choose a Template",
@@ -633,6 +634,7 @@ async def setup(ctx):
     await ctx.send(embed=embed, view=TemplateView())
 
 @bot.command()
+@owner_only()
 async def cancel(ctx):
     bot.pending_template = None
     embed = discord.Embed(
@@ -643,6 +645,7 @@ async def cancel(ctx):
     await ctx.send(embed=embed)
 
 @bot.command()
+@owner_only()
 async def confirm(ctx):
     if not hasattr(bot, 'pending_template') or bot.pending_template is None:
         await ctx.send("❌ No pending server plan! Run `!setup` first.")
@@ -959,6 +962,7 @@ async def confirm(ctx):
         await progress_msg.edit(content=f"❌ Something went wrong: {str(e)}")
 
 @bot.command()
+@owner_only()
 async def undo(ctx):
     if not hasattr(bot, 'last_build') or bot.last_build is None:
         # Try loading from MongoDB if not in memory
@@ -1178,7 +1182,7 @@ Rules:
     return extract_json(response.choices[0].message.content)
 
 @bot.command()
-@commands.has_permissions(manage_channels=True)
+@owner_only()
 async def edit(ctx):
     embed = discord.Embed(
         title="✏️ Edit Server",
@@ -1197,6 +1201,40 @@ async def edit(ctx):
 # ── MOD LOG HELPER ───────────────────────────────────────────────────────────────────────────────
 def is_higher_role(moderator: discord.Member, target: discord.Member) -> bool:
     return moderator.top_role > target.top_role
+
+def is_staff(member: discord.Member) -> bool:
+    staff_role_names = ["Admin", "Moderator", "Administrator", "Mod", "Staff"]
+    for role in member.roles:
+        if any(name.lower() in role.name.lower() for name in staff_role_names):
+            return True
+    if member.guild_permissions.kick_members:
+        return True
+    if member.guild_permissions.ban_members:
+        return True
+    if member.guild_permissions.manage_guild:
+        return True
+    if member == member.guild.owner:
+        return True
+    return False
+
+def is_owner(member: discord.Member) -> bool:
+    return member == member.guild.owner
+
+def owner_only():
+    async def predicate(ctx):
+        if not is_owner(ctx.author):
+            await ctx.send("❌ Only the server owner can use this command!")
+            return False
+        return True
+    return commands.check(predicate)
+
+def staff_only():
+    async def predicate(ctx):
+        if not is_staff(ctx.author):
+            await ctx.send("❌ You need staff permissions to use this command!")
+            return False
+        return True
+    return commands.check(predicate)
 
 async def log_mod_action(guild, action: str, moderator, target, reason: str = "No reason provided"):
     log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
@@ -1231,7 +1269,7 @@ async def log_mod_action(guild, action: str, moderator, target, reason: str = "N
 # ── MOD COMMANDS ──────────────────────────────────────────────────────────────────────────────
 
 @bot.command()
-@commands.has_permissions(kick_members=True)
+@staff_only()
 async def promote(ctx, member: discord.Member, *, role_type: str = "mod"):
     guild = ctx.guild
     role_type = role_type.lower().strip()
@@ -1263,7 +1301,7 @@ async def promote(ctx, member: discord.Member, *, role_type: str = "mod"):
 
 
 @bot.command()
-@commands.has_permissions(kick_members=True)
+@staff_only()
 async def demote(ctx, member: discord.Member):
     guild = ctx.guild
     staff_roles = ["Admin", "Moderator"]
@@ -1297,7 +1335,7 @@ async def demote(ctx, member: discord.Member):
 
 
 @bot.command()
-@commands.has_permissions(kick_members=True)
+@staff_only()
 async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     if not is_higher_role(ctx.author, member):
         await ctx.send("❌ You can't kick someone with an equal or higher role than you!")
@@ -1318,7 +1356,7 @@ async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided
 
 
 @bot.command()
-@commands.has_permissions(ban_members=True)
+@staff_only()
 async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     if not is_higher_role(ctx.author, member):
         await ctx.send("❌ You can't ban someone with an equal or higher role than you!")
@@ -1339,7 +1377,7 @@ async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"
 
 
 @bot.command()
-@commands.has_permissions(moderate_members=True)
+@staff_only()
 async def timeout(ctx, member: discord.Member, duration: str = "10m", *, reason: str = "No reason provided"):
     # Parse duration
     time_units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -1374,7 +1412,7 @@ async def timeout(ctx, member: discord.Member, duration: str = "10m", *, reason:
 
 
 @bot.command()
-@commands.has_permissions(moderate_members=True)
+@staff_only()
 async def untimeout(ctx, member: discord.Member):
     await member.timeout(None)
     embed = discord.Embed(
@@ -1388,7 +1426,7 @@ async def untimeout(ctx, member: discord.Member):
 
 
 @bot.command()
-@commands.has_permissions(kick_members=True)
+@staff_only()
 async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     if not is_higher_role(ctx.author, member):
         await ctx.send("❌ You can't warn someone with an equal or higher role than you!")
@@ -1420,12 +1458,14 @@ async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided
 # Error handler for missing permissions
 @bot.event
 async def on_command_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
+    if isinstance(error, commands.CheckFailure):
+        pass  # Already handled by owner_only/staff_only with custom messages
+    elif isinstance(error, commands.MissingPermissions):
         await ctx.send("❌ You don't have permission to use this command!")
     elif isinstance(error, commands.MemberNotFound):
         await ctx.send("❌ Member not found! Make sure you @mention them correctly.")
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Missing argument! Use `!guide` or `!modguide` for help.")
+        await ctx.send(f"❌ Missing argument! Use `!guide` for help.")
 
 
 # ── FUN COMMANDS ──────────────────────────────────────────────────────────────────────────────
@@ -2318,7 +2358,7 @@ class GuideView(discord.ui.View):
 
 
 @bot.command()
-@commands.has_permissions(manage_roles=True)
+@staff_only()
 async def addrole(ctx, member: discord.Member, *, role_name: str):
     guild = ctx.guild
     role = discord.utils.get(guild.roles, name=role_name)
@@ -2344,7 +2384,7 @@ async def addrole(ctx, member: discord.Member, *, role_name: str):
 
 
 @bot.command()
-@commands.has_permissions(manage_roles=True)
+@staff_only()
 async def removerole(ctx, member: discord.Member, *, role_name: str):
     guild = ctx.guild
     role = discord.utils.get(guild.roles, name=role_name)
@@ -2677,7 +2717,7 @@ class TicketConfirmCloseView(discord.ui.View):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@owner_only()
 async def ticket(ctx, action: str = "setup", member: discord.Member = None):
     guild = ctx.guild
 
@@ -3122,6 +3162,7 @@ async def on_message(message):
 
 
 @bot.command()
+@owner_only()
 async def redo(ctx):
     if not hasattr(bot, 'last_template') or bot.last_template is None:
         await ctx.send("❌ Nothing to redo! There's no previous server template saved.")
@@ -3141,6 +3182,7 @@ async def redo(ctx):
 
 
 @bot.command()
+@owner_only()
 async def confirmredo(ctx):
     if not hasattr(bot, 'redo_pending') or not bot.redo_pending:
         await ctx.send("❌ No redo pending! Run `!redo` first.")
@@ -3154,6 +3196,7 @@ async def confirmredo(ctx):
 
 
 @bot.command()
+@owner_only()
 async def cancelredo(ctx):
     if not hasattr(bot, 'redo_pending') or not bot.redo_pending:
         await ctx.send("❌ No redo pending!")
@@ -3200,7 +3243,7 @@ async def update_server_stats(guild: discord.Guild):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@owner_only()
 async def serverstats(ctx):
     guild = ctx.guild
     progress = await ctx.send("📊 Setting up server stats...")
@@ -3272,14 +3315,14 @@ async def serverstats(ctx):
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@owner_only()
 async def updatestats(ctx):
     await update_server_stats(ctx.guild)
     await ctx.send("✅ Server stats updated!", delete_after=3)
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@owner_only()
 async def removestats(ctx):
     guild = ctx.guild
     category = discord.utils.get(guild.categories, name="📊 SERVER STATS 📊")
@@ -3304,7 +3347,7 @@ async def before_stats():
 
 
 @bot.command()
-@commands.has_permissions(administrator=True)
+@owner_only()
 async def refreshroles(ctx):
     guild = ctx.guild
     data = await db_load(str(guild.id))
@@ -3501,7 +3544,7 @@ async def end_giveaway(guild_id: str, message_id: str, channel_id: str, winners_
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@staff_only()
 async def giveaway(ctx, duration: str, winners: int, *, prize: str):
     seconds = parse_duration(duration)
     if not seconds:
@@ -3569,7 +3612,7 @@ async def giveaway(ctx, duration: str, winners: int, *, prize: str):
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@staff_only()
 async def gend(ctx, message_id: str):
     await end_giveaway(
         str(ctx.guild.id),
@@ -3581,7 +3624,7 @@ async def gend(ctx, message_id: str):
 
 
 @bot.command()
-@commands.has_permissions(manage_guild=True)
+@staff_only()
 async def greroll(ctx, message_id: str):
     guild_id = str(ctx.guild.id)
     data = await db_load(guild_id)
