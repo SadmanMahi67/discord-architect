@@ -4,3 +4,4 @@ venv/
 __pycache__/
 .dist/
 state.json
+levels.json

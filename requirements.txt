@@ -1,6 +1,5 @@
 discord.py
 python-dotenv
-google-generativeai
 groq
 Pillow
 aiohttp
