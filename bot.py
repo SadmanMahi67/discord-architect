@@ -350,9 +350,26 @@ async def enforce_color_role_priority(guild: discord.Guild, color_roles: list | 
         if not bot_member or bot_member.top_role.position <= 1:
             return
 
+        detected_color_roles = [
+            {"name": role.name, "id": role.id}
+            for role in guild.roles
+            if is_color_role_name(role.name) and not role.managed
+        ]
+
         if color_roles is None:
             data = await db_load(str(guild.id))
             color_roles = data.get("color_roles", [])
+
+        # Merge DB-tracked and detected color roles so every color role stays on top.
+        merged = {}
+        for entry in color_roles:
+            role_id = int(entry.get("id") if isinstance(entry, dict) else entry)
+            role = guild.get_role(role_id)
+            if role:
+                merged[role.id] = {"name": role.name, "id": role.id}
+        for entry in detected_color_roles:
+            merged[entry["id"]] = entry
+        color_roles = list(merged.values())
 
         movable_roles = []
         for entry in color_roles:
@@ -845,20 +862,22 @@ async def on_guild_role_create(role: discord.Role):
     try:
         if getattr(bot, "build_in_progress", False):
             return
-        if not is_self_assignable_candidate(role):
-            return
 
-        data = await db_load(str(role.guild.id))
-        roles_channel_name = data.get("roles_channel_name") or data.get("roles_channel") or "get-your-roles"
-        roles_channel = role.guild.get_channel(int(data.get("roles_channel_id", 0))) if data.get("roles_channel_id") else None
-        if not roles_channel:
-            roles_channel = discord.utils.get(role.guild.text_channels, name=roles_channel_name)
-        if not roles_channel:
-            return
+        # Any newly created role can shift hierarchy; re-assert color roles on top.
+        await enforce_color_role_priority(role.guild)
 
-        changed = await register_self_role(role.guild, role)
-        if changed:
-            await sync_roles_panel(role.guild)
+        if is_self_assignable_candidate(role):
+            data = await db_load(str(role.guild.id))
+            roles_channel_name = data.get("roles_channel_name") or data.get("roles_channel") or "get-your-roles"
+            roles_channel = role.guild.get_channel(int(data.get("roles_channel_id", 0))) if data.get("roles_channel_id") else None
+            if not roles_channel:
+                roles_channel = discord.utils.get(role.guild.text_channels, name=roles_channel_name)
+            if not roles_channel:
+                return
+
+            changed = await register_self_role(role.guild, role)
+            if changed:
+                await sync_roles_panel(role.guild)
     except Exception as e:
         print(f"⚠️ Role create sync failed in {role.guild.name}: {e}")
 
