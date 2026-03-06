@@ -27,6 +27,7 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
@@ -196,8 +197,8 @@ SERVER_TEMPLATES = {
     }
 }
 
-# ── The system prompt we send to the LLM ──────────────────────────────────────
-SYSTEM_PROMPT = """
+# ── Prompt + Role Panel Helpers ───────────────────────────────────────────────
+BASE_SYSTEM_PROMPT = """
 You are a Discord server architect. Convert the user's request into a JSON server template.
 
 Return ONLY valid JSON, no explanation, no markdown, no code blocks. Just raw JSON.
@@ -239,10 +240,10 @@ Use this exact structure:
   ],
   "categories": [
     {
-      "name": "╔══〔 🎮 GAMING ZONE 〕══╗",
+      "name": "General",
       "channels": [
-        {"name": "「🎮」game-chat", "type": "text", "topic": "Channel description"},
-        {"name": "🔊・voice-lounge", "type": "voice"}
+        {"name": "welcome", "type": "text", "topic": "Channel description"},
+        {"name": "voice-lounge", "type": "voice"}
       ]
     }
   ],
@@ -251,13 +252,10 @@ Use this exact structure:
 
 Rules:
 - Channel names must be lowercase with hyphens after any emoji/decoration
-- Category names should have decorative borders/emojis that match the server theme
-- Text channel names should have a relevant emoji prefix like 「🎮」or 📚・
-- Voice channel names should start with 🔊・
 - Include 2-4 categories based on the theme
 - Include 3-5 channels per category
 - Always include a General category
-- Always include a 「👋」welcome channel in the General category as the first channel
+- Always include a welcome channel in the General category as the first channel
 - Always include at least one voice channel per category
 - Always include exactly these role types: admin, moderator, member
 - Add 3-5 decorative roles that match the server theme (type: decorative)
@@ -268,11 +266,11 @@ Rules:
 - Member color should be neutral (grey, white, etc)
 - Decorative roles should have fun vibrant colors
 - roles_channel is always "get-your-roles"
-- Always include a private staff category at the end called "〔🔒〕STAFF ONLY" with these channels:
-  {"name": "「📋」mod-logs", "type": "text", "topic": "Moderation logs and actions", "staff_only": true},
-  {"name": "「💬」staff-chat", "type": "text", "topic": "Private staff discussion", "staff_only": true},
-  {"name": "「🤖」bot-commands", "type": "text", "topic": "Bot commands for staff", "staff_only": true},
-  {"name": "🔊・staff-voice", "type": "voice", "staff_only": true}
+- Always include a private staff category at the end called "staff-only" with these channels:
+  {"name": "mod-logs", "type": "text", "topic": "Moderation logs and actions", "staff_only": true},
+  {"name": "staff-chat", "type": "text", "topic": "Private staff discussion", "staff_only": true},
+  {"name": "bot-commands", "type": "text", "topic": "Bot commands for staff", "staff_only": true},
+  {"name": "staff-voice", "type": "voice", "staff_only": true}
 - Mark all channels in this category with "staff_only": true
 - Always include these pastel color roles at the end of the roles list with type "color":
   {"name": "🌸 Pink", "color": "0xFFB7C5", "type": "color"},
@@ -283,6 +281,202 @@ Rules:
   {"name": "🍑 Peach", "color": "0xFFCBA4", "type": "color"},
   {"name": "🤍 White", "color": "0xFFFAFA", "type": "color"}
 """
+
+PASTEL_COLOR_EMOJIS = ["🌸", "🍋", "🍵", "🩵", "🍇", "🍑", "🤍"]
+CORE_ROLE_NAMES = {"admin", "administrator", "moderator", "mod", "member", "@everyone"}
+SELF_ROLE_EXCLUDE_KEYWORDS = ["prestige", "staff", "owner"]
+
+
+def normalize_decoration_mode(value: str) -> str:
+    text = (value or "").strip().lower()
+    if text in {"none", "no", "off", "plain"}:
+        return "none"
+    if text in {"minimal", "min", "simple"}:
+        return "minimal"
+    return "full"
+
+
+def build_system_prompt(decoration_mode: str = "full") -> str:
+    mode = normalize_decoration_mode(decoration_mode)
+    decoration_rules = {
+        "none": (
+            "- Use plain category/channel names with no decorative borders and no emoji prefixes.\n"
+            "- Keep all names simple and readable while staying lowercase with hyphens for channels.\n"
+            "- Keep the staff category name plain: \"staff-only\"."
+        ),
+        "minimal": (
+            "- Keep category names plain (no decorative borders).\n"
+            "- Use minimal decoration on channels: short emoji prefixes only where it improves clarity.\n"
+            "- Keep the staff category clear and simple, e.g. \"staff-only\"."
+        ),
+        "full": (
+            "- Category names should have decorative borders/emojis that match the server theme.\n"
+            "- Text channel names should have a relevant emoji prefix like 「🎮」or 📚・.\n"
+            "- Voice channel names should start with 🔊・.\n"
+            "- The welcome channel may be decorated (example: 「👋」welcome)."
+        ),
+    }[mode]
+    return f"{BASE_SYSTEM_PROMPT}\n{decoration_rules}\n"
+
+
+def is_color_role_name(role_name: str) -> bool:
+    return any((role_name or "").startswith(emoji) for emoji in PASTEL_COLOR_EMOJIS)
+
+
+def is_self_assignable_candidate(role: discord.Role) -> bool:
+    if role.managed or role.name.lower() in CORE_ROLE_NAMES:
+        return False
+
+    lowered = role.name.lower()
+    if any(word in lowered for word in SELF_ROLE_EXCLUDE_KEYWORDS):
+        return False
+
+    perms = role.permissions
+    elevated = (
+        perms.administrator
+        or perms.manage_guild
+        or perms.manage_channels
+        or perms.manage_roles
+        or perms.kick_members
+        or perms.ban_members
+        or perms.moderate_members
+    )
+    return not elevated
+
+
+async def enforce_color_role_priority(guild: discord.Guild, color_roles: list | None = None):
+    try:
+        bot_member = guild.me
+        if not bot_member or bot_member.top_role.position <= 1:
+            return
+
+        if color_roles is None:
+            data = await db_load(str(guild.id))
+            color_roles = data.get("color_roles", [])
+
+        movable_roles = []
+        for entry in color_roles:
+            role_id = entry.get("id") if isinstance(entry, dict) else entry
+            role = guild.get_role(int(role_id))
+            if role and not role.managed and role.position < bot_member.top_role.position:
+                movable_roles.append(role)
+
+        if not movable_roles:
+            return
+
+        start_position = bot_member.top_role.position - 1
+        positions = {}
+        for idx, role in enumerate(sorted(movable_roles, key=lambda r: r.position, reverse=True)):
+            target = start_position - idx
+            if target > 0 and role.position != target:
+                positions[role] = target
+
+        if positions:
+            await guild.edit_role_positions(positions=positions)
+    except Exception as e:
+        print(f"⚠️ Could not reorder color roles in {guild.name}: {e}")
+
+
+async def register_self_role(guild: discord.Guild, role: discord.Role) -> bool:
+    if not is_self_assignable_candidate(role):
+        return False
+
+    data = await db_load(str(guild.id))
+    bucket = "color_roles" if is_color_role_name(role.name) else "decorative_roles"
+    current = data.get(bucket, [])
+    if any(int(r.get("id", 0)) == role.id for r in current):
+        return False
+
+    current.append({"name": role.name, "id": role.id})
+    await db_save(str(guild.id), {bucket: current})
+    return True
+
+
+async def sync_roles_panel(guild: discord.Guild, force_recreate: bool = False):
+    guild_id = str(guild.id)
+    data = await db_load(guild_id)
+
+    roles_channel = None
+    channel_id = data.get("roles_channel_id")
+    if channel_id:
+        roles_channel = guild.get_channel(int(channel_id))
+    if not roles_channel:
+        roles_channel_name = data.get("roles_channel_name") or data.get("roles_channel") or "get-your-roles"
+        roles_channel = discord.utils.get(guild.text_channels, name=roles_channel_name)
+    if not roles_channel:
+        return False, "roles channel not found"
+
+    decorative_roles = []
+    for entry in data.get("decorative_roles", []):
+        role = guild.get_role(int(entry.get("id", 0)))
+        if role:
+            decorative_roles.append({"name": role.name, "id": role.id})
+
+    color_roles = []
+    for entry in data.get("color_roles", []):
+        role = guild.get_role(int(entry.get("id", 0)))
+        if role:
+            color_roles.append({"name": role.name, "id": role.id})
+
+    await enforce_color_role_priority(guild, color_roles)
+
+    if force_recreate:
+        try:
+            await roles_channel.purge(limit=25)
+        except Exception:
+            pass
+
+    identity_content = (
+        "**🎭 Identity Roles**\n\nPick what describes you!\nClick to get or remove a role!"
+        if decorative_roles
+        else "**🎭 Identity Roles**\n\nNo identity roles available yet."
+    )
+    color_content = (
+        "**🎨 Color Roles**\n\nPick your color! Choosing a new one removes the old one automatically!"
+        if color_roles
+        else "**🎨 Color Roles**\n\nNo color roles available yet."
+    )
+
+    identity_view = RoleView(decorative_roles, [])
+    color_view = RoleView([], color_roles)
+
+    identity_msg = None
+    color_msg = None
+    if not force_recreate:
+        identity_msg_id = data.get("roles_identity_message_id")
+        color_msg_id = data.get("roles_color_message_id")
+        if identity_msg_id:
+            try:
+                identity_msg = await roles_channel.fetch_message(int(identity_msg_id))
+            except Exception:
+                identity_msg = None
+        if color_msg_id:
+            try:
+                color_msg = await roles_channel.fetch_message(int(color_msg_id))
+            except Exception:
+                color_msg = None
+
+    if identity_msg:
+        await identity_msg.edit(content=identity_content, view=identity_view)
+    else:
+        identity_msg = await roles_channel.send(content=identity_content, view=identity_view)
+
+    if color_msg:
+        await color_msg.edit(content=color_content, view=color_view)
+    else:
+        color_msg = await roles_channel.send(content=color_content, view=color_view)
+
+    await db_save(guild_id, {
+        "roles_channel_id": roles_channel.id,
+        "roles_channel_name": roles_channel.name,
+        "decorative_roles": decorative_roles,
+        "color_roles": color_roles,
+        "roles_identity_message_id": identity_msg.id,
+        "roles_color_message_id": color_msg.id
+    })
+    bot.decorative_roles = decorative_roles
+    bot.color_roles = color_roles
+    return True, None
 
 BLOCKED_WORDS = [
     "nigger", "nigga", "faggot", "fag", "retard", "retarded",
@@ -352,6 +546,14 @@ class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
         default="yes"
     )
 
+    decoration_style = discord.ui.TextInput(
+        label="Decoration Style (none/minimal/full)",
+        placeholder="full",
+        required=False,
+        max_length=8,
+        default="full"
+    )
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
@@ -361,6 +563,7 @@ class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
         extras = self.extra_details.value.strip()
         wants_tickets = self.add_tickets.value.strip().lower() != "no"
         wants_stats = self.add_stats.value.strip().lower() != "no"
+        decoration_mode = normalize_decoration_mode(self.decoration_style.value)
 
         user_input = template_hint or "a general purpose server"
         if custom_name:
@@ -369,9 +572,11 @@ class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
             user_input += f". This server is for {members} members"
         if extras:
             user_input += f". Extra details: {extras}"
+        user_input += f". Decoration style preference: {decoration_mode}"
 
         bot.setup_wants_tickets = wants_tickets
         bot.setup_wants_stats = wants_stats
+        bot.setup_decoration_mode = decoration_mode
         bot.selected_template = self.template_key
 
         ctx_like = await interaction.channel.send("🧠 Generating your server plan...")
@@ -380,7 +585,7 @@ class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
             response = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": build_system_prompt(decoration_mode)},
                     {"role": "user", "content": user_input}
                 ]
             )
@@ -435,6 +640,7 @@ class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
                 value=", ".join(color_roles) if color_roles else "None",
                 inline=True
             )
+            embed.add_field(name="✨ Decoration", value=decoration_mode.title(), inline=True)
 
             bot.pending_template = server_template
 
@@ -523,8 +729,7 @@ class RoleButton(discord.ui.Button):
                 )
                 return
 
-            pastel_emojis = ["🌸", "🍋", "🍵", "🩵", "🍇", "🍑", "🤍"]
-            is_color_role = any(role.name.startswith(emoji) for emoji in pastel_emojis)
+            is_color_role = is_color_role_name(role.name)
 
             if role in member.roles:
                 await member.remove_roles(role)
@@ -536,11 +741,13 @@ class RoleButton(discord.ui.Button):
                 if is_color_role:
                     color_roles_to_remove = [
                         r for r in member.roles
-                        if any(r.name.startswith(emoji) for emoji in pastel_emojis)
+                        if is_color_role_name(r.name)
                     ]
                     if color_roles_to_remove:
                         await member.remove_roles(*color_roles_to_remove)
                 await member.add_roles(role)
+                if is_color_role:
+                    await enforce_color_role_priority(guild)
                 await interaction.response.send_message(
                     f"🎉 You now have **{role.name}**!",
                     ephemeral=True
@@ -633,9 +840,50 @@ async def on_guild_available(guild):
         automod_config = data.get("automod", {})
         if automod_config:
             bot.automod_cache[str(guild.id)] = automod_config
+        await enforce_color_role_priority(guild, color_roles)
 
     except Exception as e:
         print(f"⚠️ Could not load data for {guild.name}: {e}")
+
+
+@bot.event
+async def on_guild_role_create(role: discord.Role):
+    try:
+        if getattr(bot, "build_in_progress", False):
+            return
+        if not is_self_assignable_candidate(role):
+            return
+
+        data = await db_load(str(role.guild.id))
+        roles_channel_name = data.get("roles_channel_name") or data.get("roles_channel") or "get-your-roles"
+        roles_channel = role.guild.get_channel(int(data.get("roles_channel_id", 0))) if data.get("roles_channel_id") else None
+        if not roles_channel:
+            roles_channel = discord.utils.get(role.guild.text_channels, name=roles_channel_name)
+        if not roles_channel:
+            return
+
+        changed = await register_self_role(role.guild, role)
+        if changed:
+            await sync_roles_panel(role.guild)
+    except Exception as e:
+        print(f"⚠️ Role create sync failed in {role.guild.name}: {e}")
+
+
+@bot.event
+async def on_guild_role_delete(role: discord.Role):
+    try:
+        data = await db_load(str(role.guild.id))
+        decorative_roles = [r for r in data.get("decorative_roles", []) if int(r.get("id", 0)) != role.id]
+        color_roles = [r for r in data.get("color_roles", []) if int(r.get("id", 0)) != role.id]
+        if decorative_roles == data.get("decorative_roles", []) and color_roles == data.get("color_roles", []):
+            return
+        await db_save(str(role.guild.id), {
+            "decorative_roles": decorative_roles,
+            "color_roles": color_roles
+        })
+        await sync_roles_panel(role.guild)
+    except Exception as e:
+        print(f"⚠️ Role delete sync failed in {role.guild.name}: {e}")
 
 @bot.command()
 async def hello(ctx):
@@ -650,9 +898,9 @@ async def generate_server_plan(ctx, user_input: str):
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                model="llama-3.3-70b-versatile",
+                messages=[
+                {"role": "system", "content": build_system_prompt("full")},
                 {"role": "user", "content": user_input}
             ]
         )
@@ -752,6 +1000,7 @@ async def confirm(ctx):
     guild = ctx.guild
 
     progress_msg = await ctx.send("🏗️ Building your server... please wait!")
+    bot.build_in_progress = True
 
     try:
         created = {
@@ -835,6 +1084,12 @@ async def confirm(ctx):
             role_objects[role_data["name"]] = role
             created["roles"].append(role.id)
             await asyncio.sleep(0.5)
+
+        await enforce_color_role_priority(guild, [
+            {"name": r["name"], "id": role_objects[r["name"]].id}
+            for r in template.get("roles", [])
+            if r.get("type") == "color" and r["name"] in role_objects
+        ])
 
         # Step 2 — Give creator Admin, everyone else Member
         await progress_msg.edit(content="👑 Assigning roles to members...")
@@ -923,33 +1178,16 @@ async def confirm(ctx):
             if r.get("type") == "color" and r["name"] in role_objects
         ]
 
-        # Send identity roles as first message
-        identity_view = RoleView(decorative_roles, [])
-        await roles_channel.send(
-            content=(
-                "**🎭 Identity Roles**\n\n"
-                "Pick what describes you!\n"
-                "Click to get or remove a role!"
-            ),
-            view=identity_view
-        )
-
-        # Send color roles as second message
-        color_view = RoleView([], color_roles)
-        await roles_channel.send(
-            content=(
-                "**🎨 Color Roles**\n\n"
-                "Pick your color! Choosing a new one removes the old one automatically!"
-            ),
-            view=color_view
-        )
-
-        # Save role data to MongoDB so buttons survive restarts
+        # Save role data first, then build/update role panel messages.
         await db_save(str(ctx.guild.id), {
+            "roles_channel": roles_channel.name,
+            "roles_channel_name": roles_channel.name,
+            "roles_channel_id": roles_channel.id,
             "decorative_roles": decorative_roles,
             "color_roles": color_roles,
             "member_role_id": member_role.id if member_role else None
         })
+        await sync_roles_panel(guild, force_recreate=True)
         bot.decorative_roles = decorative_roles
         bot.color_roles = color_roles
 
@@ -1024,11 +1262,7 @@ async def confirm(ctx):
                         read_messages=True
                     )
 
-                    total_members = len([m for m in ctx.guild.members if not m.bot])
-                    total_bots = len([m for m in ctx.guild.members if m.bot])
-                    online_members = len([m for m in ctx.guild.members if not m.bot and m.status != discord.Status.offline])
-                    total_channels = len(ctx.guild.text_channels) + len(ctx.guild.voice_channels)
-                    total_roles = len(ctx.guild.roles) - 1
+                    total_members, total_bots, online_members, total_channels, total_roles = await compute_server_counts(ctx.guild)
 
                     stats = [
                         f"👥・ Members: {total_members}",
@@ -1057,6 +1291,8 @@ async def confirm(ctx):
 
     except Exception as e:
         await progress_msg.edit(content=f"❌ Something went wrong: {str(e)}")
+    finally:
+        bot.build_in_progress = False
 
 @bot.command()
 @owner_only()
@@ -2242,6 +2478,11 @@ class AddRoleModal(discord.ui.Modal, title="➕ Add Role"):
                 hoist=hoist,
                 mentionable=True
             )
+            registered = await register_self_role(guild, role)
+            if registered:
+                await sync_roles_panel(guild)
+            if is_color_role_name(role.name):
+                await enforce_color_role_priority(guild)
             embed = discord.Embed(
                 title="✅ Role Created!",
                 color=role_color
@@ -2249,6 +2490,8 @@ class AddRoleModal(discord.ui.Modal, title="➕ Add Role"):
             embed.add_field(name="Name", value=role.name, inline=True)
             embed.add_field(name="Color", value=str(role_color), inline=True)
             embed.add_field(name="Shown Separately", value="Yes" if hoist else "No", inline=True)
+            if registered:
+                embed.add_field(name="Self-Role Panel", value="Updated automatically", inline=False)
             await interaction.followup.send(embed=embed)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}")
@@ -3352,6 +3595,22 @@ async def cancelredo(ctx):
 
 # ── SERVER STATS ───────────────────────────────────────────────────────────────────────────
 
+async def compute_server_counts(guild: discord.Guild):
+    # Ensure member cache is warm so online/member numbers are accurate.
+    if not guild.chunked:
+        try:
+            await guild.chunk(cache=True)
+        except Exception:
+            pass
+
+    total_members = len([m for m in guild.members if not m.bot])
+    total_bots = len([m for m in guild.members if m.bot])
+    online_members = len([m for m in guild.members if not m.bot and m.status != discord.Status.offline])
+    total_channels = len(guild.text_channels) + len(guild.voice_channels)
+    total_roles = len(guild.roles) - 1
+    return total_members, total_bots, online_members, total_channels, total_roles
+
+
 async def update_server_stats(guild: discord.Guild):
     try:
         state = load_state()
@@ -3363,11 +3622,7 @@ async def update_server_stats(guild: discord.Guild):
         if not category:
             return
 
-        total_members = len([m for m in guild.members if not m.bot])
-        total_bots = len([m for m in guild.members if m.bot])
-        online_members = len([m for m in guild.members if not m.bot and m.status != discord.Status.offline])
-        total_channels = len(guild.text_channels) + len(guild.voice_channels)
-        total_roles = len(guild.roles) - 1
+        total_members, total_bots, online_members, total_channels, total_roles = await compute_server_counts(guild)
 
         stats = [
             f"👥・ Members: {total_members}",
@@ -3414,11 +3669,7 @@ async def serverstats(ctx):
         )
 
         # Count stats
-        total_members = len([m for m in guild.members if not m.bot])
-        total_bots = len([m for m in guild.members if m.bot])
-        online_members = len([m for m in guild.members if not m.bot and m.status != discord.Status.offline])
-        total_channels = len(guild.text_channels) + len(guild.voice_channels)
-        total_roles = len(guild.roles) - 1  # exclude @everyone
+        total_members, total_bots, online_members, total_channels, total_roles = await compute_server_counts(guild)
 
         # Create stat channels
         stats = [
@@ -3496,39 +3747,14 @@ async def before_stats():
 async def refreshroles(ctx):
     guild = ctx.guild
     data = await db_load(str(guild.id))
-    decorative_roles = data.get("decorative_roles", [])
-    color_roles = data.get("color_roles", [])
-
-    if not decorative_roles and not color_roles:
+    if not data.get("decorative_roles") and not data.get("color_roles"):
         await ctx.send("❌ No saved role data found! Run `!setup` and `!confirm` first.")
         return
 
-    roles_channel = discord.utils.get(guild.text_channels, name="get-your-roles")
-    if not roles_channel:
-        await ctx.send("❌ Couldn't find #get-your-roles channel!")
+    ok, reason = await sync_roles_panel(guild, force_recreate=True)
+    if not ok:
+        await ctx.send(f"❌ Couldn't refresh role panels: {reason}")
         return
-
-    await roles_channel.purge(limit=10)
-
-    identity_view = RoleView(decorative_roles, [])
-    await roles_channel.send(
-        content=(
-            "**🎭 Identity Roles**\n\n"
-            "Pick what describes you!\n"
-            "Click to get or remove a role!"
-        ),
-        view=identity_view
-    )
-
-    color_view = RoleView([], color_roles)
-    await roles_channel.send(
-        content=(
-            "**🎨 Color Roles**\n\n"
-            "Pick your color! Choosing a new one removes the old one automatically!"
-        ),
-        view=color_view
-    )
-
     await ctx.send("✅ Role buttons refreshed!", delete_after=3)
 
 
