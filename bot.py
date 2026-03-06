@@ -323,6 +323,19 @@ def is_color_role_name(role_name: str) -> bool:
     return any((role_name or "").startswith(emoji) for emoji in PASTEL_COLOR_EMOJIS)
 
 
+def role_creation_priority(role_data: dict) -> int:
+    # User-requested behavior: create color roles before every other role type.
+    role_type = (role_data or {}).get("type", "decorative")
+    priorities = {
+        "color": 0,
+        "admin": 1,
+        "moderator": 2,
+        "member": 3,
+        "decorative": 4,
+    }
+    return priorities.get(role_type, 5)
+
+
 def is_self_assignable_candidate(role: discord.Role) -> bool:
     if role.managed or role.name.lower() in CORE_ROLE_NAMES:
         return False
@@ -753,14 +766,10 @@ class RoleButton(discord.ui.Button):
                     if color_roles_to_remove:
                         await member.remove_roles(*color_roles_to_remove)
                 await member.add_roles(role)
-                warning = ""
                 if is_color_role:
                     await enforce_color_role_priority(guild)
-                    refreshed_role = guild.get_role(role.id)
-                    if refreshed_role and refreshed_role.position <= member.top_role.position:
-                        warning = "\n\n⚠️ If name color still doesn't change, move the bot role above all custom roles in Server Settings > Roles."
                 await interaction.response.send_message(
-                    f"🎉 You now have **{role.name}**!{warning}",
+                    f"🎉 You now have **{role.name}**!",
                     ephemeral=True
                 )
         except Exception as e:
@@ -1065,7 +1074,8 @@ async def confirm(ctx):
         await progress_msg.edit(content="🎨 Creating roles and permissions...")
         role_objects = {}
 
-        for role_data in template.get("roles", []):
+        ordered_roles = sorted(template.get("roles", []), key=role_creation_priority)
+        for role_data in ordered_roles:
             color_value = int(role_data.get("color", "0x3498db"), 16)
             role_type = role_data.get("type", "decorative")
 
