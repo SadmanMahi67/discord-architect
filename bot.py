@@ -515,13 +515,6 @@ class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
         max_length=100
     )
 
-    member_count = discord.ui.TextInput(
-        label="Number of Members",
-        placeholder="e.g. 5, 10, 50...",
-        required=False,
-        max_length=10
-    )
-
     extra_details = discord.ui.TextInput(
         label="Extra Details (optional)",
         placeholder="e.g. we play Valorant and Minecraft...",
@@ -559,7 +552,6 @@ class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
 
         template_hint = self.template_data.get("hint", "general server")
         custom_name = self.server_name.value.strip()
-        members = self.member_count.value.strip()
         extras = self.extra_details.value.strip()
         wants_tickets = self.add_tickets.value.strip().lower() != "no"
         wants_stats = self.add_stats.value.strip().lower() != "no"
@@ -568,8 +560,6 @@ class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
         user_input = template_hint or "a general purpose server"
         if custom_name:
             user_input += f". Server name should be: {custom_name}"
-        if members:
-            user_input += f". This server is for {members} members"
         if extras:
             user_input += f". Extra details: {extras}"
         user_input += f". Decoration style preference: {decoration_mode}"
