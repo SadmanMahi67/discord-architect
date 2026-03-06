@@ -372,7 +372,7 @@ async def enforce_color_role_priority(guild: discord.Guild, color_roles: list | 
                 positions[role] = target
 
         if positions:
-            await guild.edit_role_positions(positions=positions)
+            await guild.edit_role_positions(positions)
     except Exception as e:
         print(f"⚠️ Could not reorder color roles in {guild.name}: {e}")
 
@@ -736,10 +736,14 @@ class RoleButton(discord.ui.Button):
                     if color_roles_to_remove:
                         await member.remove_roles(*color_roles_to_remove)
                 await member.add_roles(role)
+                warning = ""
                 if is_color_role:
                     await enforce_color_role_priority(guild)
+                    refreshed_role = guild.get_role(role.id)
+                    if refreshed_role and refreshed_role.position <= member.top_role.position:
+                        warning = "\n\n⚠️ If name color still doesn't change, move the bot role above all custom roles in Server Settings > Roles."
                 await interaction.response.send_message(
-                    f"🎉 You now have **{role.name}**!",
+                    f"🎉 You now have **{role.name}**!{warning}",
                     ephemeral=True
                 )
         except Exception as e:
