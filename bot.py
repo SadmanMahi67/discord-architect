@@ -124,6 +124,24 @@ def save_levels(data: dict):
     with open(LEVELS_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
+
+async def load_guild_levels(guild_id: str) -> dict:
+    data = await db_load(guild_id)
+    levels = data.get("levels", {})
+    if isinstance(levels, dict) and levels:
+        return levels
+
+    # Backward-compatible fallback for local/dev runs.
+    file_levels = load_levels()
+    guild_levels = file_levels.get(guild_id, {})
+    if guild_levels:
+        await db_save(guild_id, {"levels": guild_levels})
+    return guild_levels
+
+
+async def save_guild_levels(guild_id: str, guild_levels: dict):
+    await db_save(guild_id, {"levels": guild_levels})
+
 def is_staff(member: discord.Member) -> bool:
     staff_role_names = ["Admin", "Moderator", "Administrator", "Mod", "Staff"]
     for role in member.roles:
@@ -3277,14 +3295,13 @@ async def rank(ctx, member: discord.Member = None):
     guild_id = str(ctx.guild.id)
     user_id = str(member.id)
 
-    levels = load_levels()
-    if guild_id not in levels or user_id not in levels[guild_id]:
+    guild_levels = await load_guild_levels(guild_id)
+    if user_id not in guild_levels:
         await ctx.send(f"❌ {member.mention} hasn't earned any XP yet! Start chatting!")
         return
 
-    data = levels[guild_id][user_id]
-    guild_data = levels.get(guild_id, {})
-    sorted_users = sorted(guild_data.items(), key=lambda x: x[1]["xp"], reverse=True)
+    data = guild_levels[user_id]
+    sorted_users = sorted(guild_levels.items(), key=lambda x: x[1].get("xp", 0), reverse=True)
     rank_position = next((i + 1 for i, (uid, _) in enumerate(sorted_users) if uid == user_id), "?")
 
     thinking = await ctx.send("🎨 Generating your rank card...")
@@ -3326,13 +3343,10 @@ async def rank(ctx, member: discord.Member = None):
 async def leaderboard(ctx):
     try:
         guild_id = str(ctx.guild.id)
-        levels = load_levels()
-
-        if guild_id not in levels or not levels[guild_id]:
+        guild_data = await load_guild_levels(guild_id)
+        if not guild_data:
             await ctx.send("❌ No one has earned XP yet! Start chatting!")
             return
-
-        guild_data = levels[guild_id]
 
         # Filter out users with 0 XP
         active_users = {uid: data for uid, data in guild_data.items() if data.get("xp", 0) > 0}
@@ -3470,31 +3484,29 @@ async def on_message(message):
     if now - last >= 60:
         bot.xp_cooldowns[cooldown_key] = now
 
-        levels = load_levels()
-        if guild_id not in levels:
-            levels[guild_id] = {}
-        if user_id not in levels[guild_id]:
-            levels[guild_id][user_id] = {"xp": 0, "level": 0, "messages": 0, "prestige": 0}
+        guild_levels = await load_guild_levels(guild_id)
+        if user_id not in guild_levels:
+            guild_levels[user_id] = {"xp": 0, "level": 0, "messages": 0, "prestige": 0}
 
         xp_gain = random.randint(15, 25)
-        levels[guild_id][user_id]["xp"] += xp_gain
-        levels[guild_id][user_id]["messages"] = levels[guild_id][user_id].get("messages", 0) + 1
+        guild_levels[user_id]["xp"] += xp_gain
+        guild_levels[user_id]["messages"] = guild_levels[user_id].get("messages", 0) + 1
 
-        old_level = get_level_from_xp(levels[guild_id][user_id]["xp"] - xp_gain)
-        new_level = get_level_from_xp(levels[guild_id][user_id]["xp"])
+        old_level = get_level_from_xp(guild_levels[user_id]["xp"] - xp_gain)
+        new_level = get_level_from_xp(guild_levels[user_id]["xp"])
 
         # Level up!
         if new_level > old_level:
-            levels[guild_id][user_id]["level"] = new_level
-            prestige = levels[guild_id][user_id].get("prestige", 0)
+            guild_levels[user_id]["level"] = new_level
+            prestige = guild_levels[user_id].get("prestige", 0)
 
             # Check for prestige at level 50
             if new_level >= 50:
                 prestige += 1
-                levels[guild_id][user_id]["prestige"] = prestige
-                levels[guild_id][user_id]["xp"] = 0
-                levels[guild_id][user_id]["level"] = 0
-                save_levels(levels)
+                guild_levels[user_id]["prestige"] = prestige
+                guild_levels[user_id]["xp"] = 0
+                guild_levels[user_id]["level"] = 0
+                await save_guild_levels(guild_id, guild_levels)
 
                 badge = get_prestige_badge(prestige)
                 prestige_embed = discord.Embed(
@@ -3522,7 +3534,7 @@ async def on_message(message):
                 await bot.process_commands(message)
                 return
 
-            save_levels(levels)
+            await save_guild_levels(guild_id, guild_levels)
             title = get_title(new_level, prestige)
             badge = get_prestige_badge(prestige)
 
@@ -3567,7 +3579,7 @@ async def on_message(message):
 
             await message.channel.send(embed=embed)
         else:
-            save_levels(levels)
+            await save_guild_levels(guild_id, guild_levels)
 
     await bot.process_commands(message)
 
