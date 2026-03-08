@@ -3588,12 +3588,8 @@ async def on_message(message):
 @owner_only()
 async def redo(ctx):
     if not hasattr(bot, 'last_template') or bot.last_template is None:
-        data = await db_load(str(ctx.guild.id))
-        if data.get("last_template"):
-            bot.last_template = data["last_template"]
-        else:
-            await ctx.send("❌ Nothing to redo! There's no previous server template saved.")
-            return
+        await ctx.send("❌ Nothing to redo! There's no previous server template saved.")
+        return
 
     embed = discord.Embed(
         title="🔄 Redo Last Build?",
@@ -3614,15 +3610,6 @@ async def confirmredo(ctx):
     if not hasattr(bot, 'redo_pending') or not bot.redo_pending:
         await ctx.send("❌ No redo pending! Run `!redo` first.")
         return
-
-    if not hasattr(bot, 'last_template') or bot.last_template is None:
-        data = await db_load(str(ctx.guild.id))
-        if data.get("last_template"):
-            bot.last_template = data["last_template"]
-        else:
-            await ctx.send("❌ Couldn't find a saved template to redo.")
-            bot.redo_pending = False
-            return
 
     bot.redo_pending = False
     bot.pending_template = bot.last_template
