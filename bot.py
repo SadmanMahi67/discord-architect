@@ -1293,7 +1293,7 @@ async def confirm(ctx):
         await progress_msg.edit(content="🔒 Applying permission gates...")
         await asyncio.sleep(0.5)
         # Hide @everyone from ALL categories/channels server-wide
-        await guild.edit(default_message_notifications=discord.NotificationLevel.only_mentions)
+        await guild.edit(default_notifications=discord.NotificationLevel.only_mentions)
         for cat in guild.categories:
             await cat.set_permissions(guild.default_role, read_messages=False)
             await asyncio.sleep(0.2)
