@@ -4575,6 +4575,60 @@ async def create_info_category(guild: discord.Guild, role_objects: dict = None,
             add_reactions=True
         )
     await create_rules_channel(guild, category, role_objects, template, created)
+
+    # Invite channel — read-only, bot posts the permanent link
+    existing_ch_names = [c.name for c in category.channels]
+    if not any("invite" in n for n in existing_ch_names):
+        # Build read-only overwrites matching the rest of INFO
+        invite_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=False,
+                add_reactions=False,
+                create_public_threads=False,
+                create_private_threads=False,
+            ),
+            guild.me: discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                manage_messages=True,
+            ),
+        }
+        if member_role:
+            invite_overwrites[member_role] = discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=False,
+                add_reactions=False,
+                create_public_threads=False,
+                create_private_threads=False,
+            )
+        invite_ch = await guild.create_text_channel(
+            "《🔗》invite",
+            category=category,
+            topic="Permanent invite link — share with friends!",
+            overwrites=invite_overwrites,
+        )
+        if created is not None:
+            created["channels"].append(invite_ch.id)
+        await asyncio.sleep(0.4)
+        try:
+            invite = await invite_ch.create_invite(max_age=0, max_uses=0, reason="Server invite channel")
+            embed = discord.Embed(
+                title="🔗 Invite Friends!",
+                description=(
+                    f"Share this permanent invite link with your friends and family:\n\n"
+                    f"**{invite.url}**\n\n"
+                    "This link never expires and has no use limit."
+                ),
+                color=discord.Color.blurple(),
+            )
+            if guild.icon:
+                embed.set_thumbnail(url=guild.icon.url)
+            embed.set_footer(text="Copy the link above and send it to anyone!")
+            await invite_ch.send(embed=embed)
+        except Exception as e:
+            print(f"⚠️ Could not create invite: {e}")
+
     return category
 
 
@@ -4634,32 +4688,7 @@ async def ensure_general_channels(guild: discord.Guild, created: dict):
         created["channels"].append(ch.id)
         await asyncio.sleep(0.4)
 
-    # Check for an invite channel
-    has_invite = any("invite" in n for n in existing_names)
-    if not has_invite:
-        invite_ch = await guild.create_text_channel(
-            "「🔗」invite",
-            category=general_cat,
-            topic="Permanent invite link — share with friends!"
-        )
-        created["channels"].append(invite_ch.id)
-        await asyncio.sleep(0.4)
-        # Generate a permanent invite and post it
-        try:
-            invite = await invite_ch.create_invite(max_age=0, max_uses=0, reason="Server invite channel")
-            embed = discord.Embed(
-                title="🔗 Invite Friends!",
-                description=(
-                    f"Share this permanent invite link with your friends and family:\n\n"
-                    f"**{invite.url}**\n\n"
-                    "This link never expires and has no use limit."
-                ),
-                color=discord.Color.blurple()
-            )
-            embed.set_footer(text="Copy the link above and send it to anyone!")
-            await invite_ch.send(embed=embed)
-        except Exception as e:
-            print(f"⚠️ Could not create invite: {e}")
+
 
 
 # ── COMMUNITY CHANNELS HELPER ─────────────────────────────────────────────────────────────────
