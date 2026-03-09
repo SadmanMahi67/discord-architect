@@ -1300,9 +1300,27 @@ async def confirm(ctx):
         await asyncio.sleep(0.5)
         # Hide @everyone from ALL categories/channels server-wide
         await guild.edit(default_notifications=discord.NotificationLevel.only_mentions)
+        _bot_full = discord.PermissionOverwrite(
+            read_messages=True,
+            send_messages=True,
+            manage_messages=True,
+            manage_channels=True,
+            embed_links=True,
+            attach_files=True,
+            read_message_history=True,
+            add_reactions=True,
+            manage_threads=True,
+            create_public_threads=True
+        )
         for cat in guild.categories:
             await cat.set_permissions(guild.default_role, read_messages=False)
+            await cat.set_permissions(guild.me, overwrite=_bot_full)
             await asyncio.sleep(0.2)
+        # Also set bot overwrite on every individual channel so nothing slips through
+        for ch in guild.channels:
+            if not isinstance(ch, discord.CategoryChannel):
+                await ch.set_permissions(guild.me, overwrite=_bot_full)
+                await asyncio.sleep(0.1)
         # Grant Member role read+write access to all non-INFO, non-staff categories
         if member_role:
             for cat in guild.categories:
@@ -3379,7 +3397,10 @@ class TicketConfirmCloseView(discord.ui.View):
                 value=f"```{transcript[:800]}```" if transcript else "Empty",
                 inline=False
             )
-            await log_channel.send(embed=log_embed)
+            try:
+                await log_channel.send(embed=log_embed)
+            except discord.Forbidden:
+                print(f"⚠️ Cannot send to mod-logs ({log_channel.id}) — missing permissions")
 
         await interaction.response.send_message("🔒 Closing ticket...")
         await asyncio.sleep(2)
