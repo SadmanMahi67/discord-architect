@@ -79,9 +79,7 @@ async def automod_warn(guild: discord.Guild, member: discord.Member, reason: str
 
     await db_save(guild_id, {"automod_warns": automod_warns})
 
-    log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
-    if not log_channel:
-        log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+    log_channel = discord.utils.find(lambda c: "mod-logs" in c.name.lower(), guild.text_channels)
     if log_channel:
         embed = discord.Embed(
             title="🛡️ Auto-Mod Action",
@@ -1769,9 +1767,7 @@ def is_higher_role(moderator: discord.Member, target: discord.Member) -> bool:
     return moderator.top_role > target.top_role
 
 async def log_mod_action(guild, action: str, moderator, target, reason: str = "No reason provided"):
-    log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
-    if not log_channel:
-        log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+    log_channel = discord.utils.find(lambda c: "mod-logs" in c.name.lower(), guild.text_channels)
     if not log_channel:
         return
 
@@ -1822,11 +1818,9 @@ async def log_mod_action(guild, action: str, moderator, target, reason: str = "N
 async def fixmodlogs(ctx):
     """Fix bot permissions on mod-logs so it can send embeds again."""
     guild = ctx.guild
-    log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
+    log_channel = discord.utils.find(lambda c: "mod-logs" in c.name.lower(), guild.text_channels)
     if not log_channel:
-        log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
-    if not log_channel:
-        await ctx.send("❌ No **mod-logs** channel found! Make sure a channel named `mod-logs` exists.")
+        await ctx.send("❌ No **mod-logs** channel found! Make sure a channel containing `mod-logs` in its name exists.")
         return
 
     try:
@@ -3481,9 +3475,7 @@ class TicketOpenView(discord.ui.View):
         )
 
         # Log to mod-logs
-        log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
-        if not log_channel:
-            log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+        log_channel = discord.utils.find(lambda c: "mod-logs" in c.name.lower(), guild.text_channels)
         if log_channel:
             log_embed = discord.Embed(
                 title="🎫 Ticket Opened",
@@ -3555,9 +3547,7 @@ class TicketConfirmCloseView(discord.ui.View):
         transcript = "\n".join(messages) if messages else "No messages"
 
         # Log to mod-logs with transcript
-        log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
-        if not log_channel:
-            log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+        log_channel = discord.utils.find(lambda c: "mod-logs" in c.name.lower(), guild.text_channels)
         if log_channel:
             log_embed = discord.Embed(
                 title="🔒 Ticket Closed",
