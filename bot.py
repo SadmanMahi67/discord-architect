@@ -1586,6 +1586,7 @@ async def undo(ctx):
         await progress_msg.edit(content=f"❌ Something went wrong: {str(e)}")
 
 @bot.event
+@bot.event
 async def on_member_join(member):
     # Only auto-assign Member if this guild has no rules reaction-gate configured.
     # If a rules channel exists, they must react ✅ to earn the Member role.
@@ -1601,14 +1602,12 @@ async def on_member_join(member):
 
     guild = member.guild
 
-    # Find welcome channel — looks for one named welcome or general
-    welcome_channel = discord.utils.get(guild.text_channels, name="welcome")
+    # Find welcome channel
+    welcome_channel = discord.utils.find(
+        lambda c: "welcome" in c.name.lower(), guild.text_channels
+    )
     if not welcome_channel:
-        welcome_channel = discord.utils.get(guild.text_channels, name="「👋」welcome")
-    if not welcome_channel:
-        # Fall back to first available text channel
         welcome_channel = guild.text_channels[0] if guild.text_channels else None
-
     if not welcome_channel:
         return
 
@@ -1638,6 +1637,21 @@ async def on_member_join(member):
     await welcome_channel.send(
         content=f"Everyone welcome {member.mention} to the server! 🎉",
         embed=embed
+    )
+
+
+@bot.event
+async def on_member_remove(member):
+    """Post a small leave message in the welcome channel."""
+    guild = member.guild
+    welcome_channel = discord.utils.find(
+        lambda c: "welcome" in c.name.lower(), guild.text_channels
+    )
+    if not welcome_channel:
+        return
+    await welcome_channel.send(
+        f"🚪 **{member.display_name}** has left the server. "
+        f"We now have **{guild.member_count}** members."
     )
 
 @bot.command()
@@ -4565,7 +4579,8 @@ async def create_info_category(guild: discord.Guild, role_objects: dict = None,
 
 
 async def ensure_general_channels(guild: discord.Guild, created: dict):
-    """Guarantee the General category has a #general chat channel and a public #bot-commands channel."""
+    """Guarantee the General category has #general, #bot-commands, and #invite channels.
+    Also locks the welcome channel to bot-only posting."""
     general_cat = None
     for cat in guild.categories:
         if "general" in cat.name.lower():
@@ -4575,6 +4590,24 @@ async def ensure_general_channels(guild: discord.Guild, created: dict):
         return
 
     existing_names = [ch.name.lower() for ch in general_cat.text_channels]
+
+    # Lock the welcome channel — bot-only posting
+    welcome_ch = discord.utils.find(
+        lambda c: "welcome" in c.name.lower(),
+        general_cat.text_channels
+    )
+    if welcome_ch:
+        await welcome_ch.set_permissions(guild.default_role,
+            read_messages=True,
+            send_messages=False,
+            add_reactions=False,
+            create_public_threads=False,
+            create_private_threads=False
+        )
+        await welcome_ch.set_permissions(guild.me,
+            read_messages=True,
+            send_messages=True
+        )
 
     # Check for a general chat channel (not welcome, not staff-related)
     has_general = any(
@@ -4600,6 +4633,33 @@ async def ensure_general_channels(guild: discord.Guild, created: dict):
         )
         created["channels"].append(ch.id)
         await asyncio.sleep(0.4)
+
+    # Check for an invite channel
+    has_invite = any("invite" in n for n in existing_names)
+    if not has_invite:
+        invite_ch = await guild.create_text_channel(
+            "「🔗」invite",
+            category=general_cat,
+            topic="Permanent invite link — share with friends!"
+        )
+        created["channels"].append(invite_ch.id)
+        await asyncio.sleep(0.4)
+        # Generate a permanent invite and post it
+        try:
+            invite = await invite_ch.create_invite(max_age=0, max_uses=0, reason="Server invite channel")
+            embed = discord.Embed(
+                title="🔗 Invite Friends!",
+                description=(
+                    f"Share this permanent invite link with your friends and family:\n\n"
+                    f"**{invite.url}**\n\n"
+                    "This link never expires and has no use limit."
+                ),
+                color=discord.Color.blurple()
+            )
+            embed.set_footer(text="Copy the link above and send it to anyone!")
+            await invite_ch.send(embed=embed)
+        except Exception as e:
+            print(f"⚠️ Could not create invite: {e}")
 
 
 # ── COMMUNITY CHANNELS HELPER ─────────────────────────────────────────────────────────────────
