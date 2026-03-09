@@ -1231,6 +1231,12 @@ async def confirm(ctx):
              next((rd for rd in template["roles"] if rd["name"] == name and rd.get("type") == "member"), None)),
             None
         )
+        mod_role = next(
+            (r for name, r in role_objects.items()
+             if template.get("roles") and
+             next((rd for rd in template["roles"] if rd["name"] == name and rd.get("type") == "moderator"), None)),
+            None
+        )
 
         # Give creator Admin
         if admin_role:
