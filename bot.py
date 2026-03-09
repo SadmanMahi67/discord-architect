@@ -4380,28 +4380,50 @@ async def create_rules_channel(guild: discord.Guild, category: discord.CategoryC
 
     guild_id = str(guild.id)
 
-    # Resolve admin / mod roles
+    # Resolve admin / mod / member roles
     admin_role = discord.utils.get(guild.roles, name="Admin")
     mod_role = discord.utils.get(guild.roles, name="Moderator")
+    member_role = None
     if role_objects and template:
         for r in template.get("roles", []):
             if r.get("type") == "admin" and r["name"] in role_objects:
                 admin_role = role_objects[r["name"]]
             elif r.get("type") == "moderator" and r["name"] in role_objects:
                 mod_role = role_objects[r["name"]]
+            elif r.get("type") == "member" and r["name"] in role_objects:
+                member_role = role_objects[r["name"]]
+    if not member_role:
+        member_role = discord.utils.find(
+            lambda r: r.name.lower() in ("member", "members") and not r.managed,
+            guild.roles
+        )
 
+    _read_only = discord.PermissionOverwrite(
+        read_messages=True,
+        send_messages=False,
+        create_public_threads=False,
+        create_private_threads=False,
+        send_messages_in_threads=False,
+        add_reactions=True
+    )
     overwrites = {
-        guild.default_role: discord.PermissionOverwrite(
-            send_messages=False, read_messages=True, add_reactions=True
-        ),
+        guild.default_role: _read_only,
         guild.me: discord.PermissionOverwrite(
             send_messages=True, read_messages=True, add_reactions=True
         )
     }
+    if member_role:
+        overwrites[member_role] = _read_only
     if admin_role:
-        overwrites[admin_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
+        overwrites[admin_role] = discord.PermissionOverwrite(
+            read_messages=True, send_messages=True,
+            create_public_threads=True, manage_threads=True
+        )
     if mod_role:
-        overwrites[mod_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
+        overwrites[mod_role] = discord.PermissionOverwrite(
+            read_messages=True, send_messages=True,
+            create_public_threads=True, manage_threads=True
+        )
 
     rules_ch = await guild.create_text_channel(
         name="「📜」rules",
