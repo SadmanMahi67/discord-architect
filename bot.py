@@ -222,7 +222,6 @@ SERVER_TEMPLATES = {
 }
 
 COMMUNITY_CHANNELS = [
-    {"name": "「�」rules", "type": "rules", "topic": "Server rules — react ✅ to gain access"},
     {"name": "「📢」announcements", "type": "text", "topic": "Official server announcements — only staff can post here", "staff_post_only": True},
     {"name": "「💡」suggestions", "type": "forum", "topic": "Share your ideas and suggestions for the server"},
     {"name": "「🐛」bug-reports", "type": "forum", "topic": "Report bugs or issues you find"},
@@ -1273,13 +1272,14 @@ async def confirm(ctx):
         # Ensure General category always has #general and #bot-commands
         await ensure_general_channels(guild, created)
 
-        # Step 4 — Create info/community category then place get-your-roles inside it
+        # Step 4 — Create info category (always, all templates) then place get-your-roles inside it
         await progress_msg.edit(content="🏗️ Setting up info & roles channels...")
         is_community_template = getattr(bot, 'selected_template', '') == 'community'
+        # INFO category always created for all templates — includes rules channel
+        anchor_category = await create_info_category(guild, role_objects, template, created)
+        # COMMUNITY category additionally created for the community template
         if is_community_template:
-            anchor_category = await create_community_channels(guild, role_objects, template, created)
-        else:
-            anchor_category = await create_info_category(guild, created)
+            await create_community_channels(guild, role_objects, template, created)
 
         roles_channel = await guild.create_text_channel(
             name=template.get("roles_channel", "get-your-roles"),
@@ -2927,7 +2927,7 @@ class GuideView(discord.ui.View):
         embed.add_field(name="!refreshroles", value="Fix role buttons after bot restart", inline=False)
         embed.add_field(name="!serverstats", value="Add live stats to your server", inline=False)
         embed.add_field(name="!ticket setup", value="Add a ticket system", inline=False)
-        embed.add_field(name="!addcommunity", value="Add community channels: rules (✅ reaction-role), announcements, forums for suggestions/bugs/reviews\nAlso moves orphan channels into the category", inline=False)
+        embed.add_field(name="!addcommunity", value="Add community channels: announcements (staff-only), forums for suggestions/bugs/reviews\nAlso moves orphan channels into the category", inline=False)
         embed.add_field(name="!announce", value="Post a styled announcement — pick channel and role from dropdowns", inline=False)
         embed.set_footer(text="Architect AI • !guide for main menu")
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -4339,16 +4339,95 @@ async def greroll(ctx, message_id: str):
 
 # ── SERVER STRUCTURE HELPERS ─────────────────────────────────────────────────────────────────
 
-async def create_info_category(guild: discord.Guild, created: dict = None) -> discord.CategoryChannel:
-    """Create a 📌 INFO category at position 1 for get-your-roles and tickets (non-community builds)."""
+async def create_rules_channel(guild: discord.Guild, category: discord.CategoryChannel,
+                               role_objects: dict = None, template: dict = None,
+                               created: dict = None):
+    """Create a 📜 rules channel with ✅ reaction-role in the given category. Idempotent."""
+    existing = discord.utils.find(lambda c: "rules" in c.name.lower(), category.channels)
+    if existing:
+        return existing
+
+    guild_id = str(guild.id)
+
+    # Resolve admin / mod roles
+    admin_role = discord.utils.get(guild.roles, name="Admin")
+    mod_role = discord.utils.get(guild.roles, name="Moderator")
+    if role_objects and template:
+        for r in template.get("roles", []):
+            if r.get("type") == "admin" and r["name"] in role_objects:
+                admin_role = role_objects[r["name"]]
+            elif r.get("type") == "moderator" and r["name"] in role_objects:
+                mod_role = role_objects[r["name"]]
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(
+            send_messages=False, read_messages=True, add_reactions=True
+        ),
+        guild.me: discord.PermissionOverwrite(
+            send_messages=True, read_messages=True, add_reactions=True
+        )
+    }
+    if admin_role:
+        overwrites[admin_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
+    if mod_role:
+        overwrites[mod_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
+
+    rules_ch = await guild.create_text_channel(
+        name="「📜」rules",
+        category=category,
+        topic="Server rules — react ✅ to gain access",
+        overwrites=overwrites
+    )
+    if created is not None:
+        created["channels"].append(rules_ch.id)
+    await asyncio.sleep(0.5)
+
+    rules_embed = discord.Embed(
+        title="📜 Server Rules",
+        description=(
+            "Please read and follow these rules to keep our community safe and fun:\n\n"
+            "**1.** 🤝 Be respectful — treat all members with kindness\n"
+            "**2.** 🚫 No harassment, hate speech, or discrimination\n"
+            "**3.** 💬 Keep topics relevant to the correct channels\n"
+            "**4.** 🔞 No NSFW, explicit, or disturbing content\n"
+            "**5.** 🔇 No spamming, flooding, or excessive caps\n"
+            "**6.** 🔗 No malicious links, scams, or phishing\n"
+            "**7.** 📢 Follow all staff instructions without argument\n"
+            "**8.** 🎭 No impersonation of members or staff\n"
+            "**9.** 🔔 No mass pinging or unnecessary role mentions\n"
+            "**10.** 📋 Use the correct channels for your content\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "**React with ✅ below to agree and gain access to the server!**"
+        ),
+        color=discord.Color.from_rgb(255, 127, 80)
+    )
+    rules_embed.set_footer(text="By reacting you agree to follow all rules above")
+    rules_msg = await rules_ch.send(embed=rules_embed)
+    await rules_msg.add_reaction("✅")
+
+    await db_save(guild_id, {
+        "rules_message_id": rules_msg.id,
+        "rules_channel_id": rules_ch.id
+    })
+    bot.rules_cache[guild_id] = {"message_id": rules_msg.id}
+
+    return rules_ch
+
+
+async def create_info_category(guild: discord.Guild, role_objects: dict = None,
+                                template: dict = None, created: dict = None) -> discord.CategoryChannel:
+    """Create a 📌 INFO category with a rules channel, for all server templates."""
     existing = discord.utils.get(guild.categories, name="📌 INFO")
     if existing:
+        # Still ensure rules channel exists inside it
+        await create_rules_channel(guild, existing, role_objects, template, created)
         return existing
     has_stats = discord.utils.get(guild.categories, name="📊 SERVER STATS 📊") is not None
     position = 1 if has_stats else 0
     category = await guild.create_category("📌 INFO", position=position)
     if created is not None:
         created["categories"].append(category.id)
+    await create_rules_channel(guild, category, role_objects, template, created)
     return category
 
 
@@ -4393,18 +4472,23 @@ async def ensure_general_channels(guild: discord.Guild, created: dict):
 # ── COMMUNITY CHANNELS HELPER ─────────────────────────────────────────────────────────────────
 
 async def create_community_channels(guild: discord.Guild, role_objects: dict = None, template: dict = None, created: dict = None) -> discord.CategoryChannel:
-    """Create the 📋 COMMUNITY category with rules, announcements, and forum channels."""
+    """Create the 📋 COMMUNITY category with announcements and forum channels."""
     existing = discord.utils.get(guild.categories, name="📋 COMMUNITY")
     if existing:
         return existing
 
-    # Place community category at position 1 (after stats at 0)
+    # Place after stats (pos 0) and INFO (pos 1) if present
     has_stats = discord.utils.get(guild.categories, name="📊 SERVER STATS 📊") is not None
-    position = 1 if has_stats else 0
+    has_info = discord.utils.get(guild.categories, name="📌 INFO") is not None
+    if has_stats and has_info:
+        position = 2
+    elif has_stats or has_info:
+        position = 1
+    else:
+        position = 0
     category = await guild.create_category("📋 COMMUNITY", position=position)
     if created is not None:
         created["categories"].append(category.id)
-    guild_id = str(guild.id)
 
     # Resolve admin / mod roles
     admin_role = discord.utils.get(guild.roles, name="Admin")
@@ -4421,60 +4505,7 @@ async def create_community_channels(guild: discord.Guild, role_objects: dict = N
         ch_name = ch_data["name"]
         ch_topic = ch_data.get("topic", "")
 
-        if ch_type == "rules":
-            # Read-only for everyone; staff and bot can post
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(
-                    send_messages=False, read_messages=True, add_reactions=True
-                ),
-                guild.me: discord.PermissionOverwrite(
-                    send_messages=True, read_messages=True, add_reactions=True
-                )
-            }
-            if admin_role:
-                overwrites[admin_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
-            if mod_role:
-                overwrites[mod_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
-
-            rules_ch = await guild.create_text_channel(
-                name=ch_name, category=category, topic=ch_topic, overwrites=overwrites
-            )
-            if created is not None:
-                created["channels"].append(rules_ch.id)
-            await asyncio.sleep(0.5)
-
-            # Post the default rules embed
-            rules_embed = discord.Embed(
-                title="📜 Server Rules",
-                description=(
-                    "Please read and follow these rules to keep our community safe and fun:\n\n"
-                    "**1.** 🤝 Be respectful — treat all members with kindness\n"
-                    "**2.** 🚫 No harassment, hate speech, or discrimination\n"
-                    "**3.** 💬 Keep topics relevant to the correct channels\n"
-                    "**4.** 🔞 No NSFW, explicit, or disturbing content\n"
-                    "**5.** 🔇 No spamming, flooding, or excessive caps\n"
-                    "**6.** 🔗 No malicious links, scams, or phishing\n"
-                    "**7.** 📢 Follow all staff instructions without argument\n"
-                    "**8.** 🎭 No impersonation of members or staff\n"
-                    "**9.** 🔔 No mass pinging or unnecessary role mentions\n"
-                    "**10.** 📋 Use the correct channels for your content\n\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "**React with ✅ below to agree and gain access to the server!**"
-                ),
-                color=discord.Color.from_rgb(255, 127, 80)
-            )
-            rules_embed.set_footer(text="By reacting you agree to follow all rules above")
-            rules_msg = await rules_ch.send(embed=rules_embed)
-            await rules_msg.add_reaction("✅")
-
-            # Persist to MongoDB so the reaction-role survives restarts
-            await db_save(guild_id, {
-                "rules_message_id": rules_msg.id,
-                "rules_channel_id": rules_ch.id
-            })
-            bot.rules_cache[guild_id] = {"message_id": rules_msg.id}
-
-        elif ch_type == "text":
+        if ch_type == "text":
             overwrites = {}
             if ch_data.get("staff_post_only"):
                 overwrites[guild.default_role] = discord.PermissionOverwrite(
@@ -4551,8 +4582,7 @@ async def addcommunity(ctx):
             title="✅ Community Channels Added!",
             description=(
                 "Created **📋 COMMUNITY** category with:\n\n"
-                "📜 **rules** — react ✅ to get Member role\n"
-                "📢 **announcements** — staff-only posting\n"
+                " **announcements** — staff-only posting\n"
                 "💡 **suggestions** — forum (members post threads)\n"
                 "🐛 **bug-reports** — forum (members post threads)\n"
                 "⭐ **reviews** — forum (members post threads)\n\n"
