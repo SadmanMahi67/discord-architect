@@ -3116,6 +3116,87 @@ async def removerole(ctx, member: discord.Member, *, role_name: str):
 
 
 @bot.command()
+@staff_only()
+async def clean(ctx, channel: discord.TextChannel = None):
+    """Delete all messages in a channel. Defaults to the current channel."""
+    target = channel or ctx.channel
+    # Require manage_messages on the target channel
+    if not ctx.author.guild_permissions.manage_messages and ctx.author != ctx.guild.owner:
+        await ctx.send("❌ You need **Manage Messages** permission to clean a channel!")
+        return
+
+    confirm_embed = discord.Embed(
+        title="🧹 Clean Channel",
+        description=(
+            f"⚠️ This will delete **all messages** in {target.mention}.\n\n"
+            "Type `!confirmclean` within 30 seconds to proceed.\n"
+            "Type `!cancelclean` to cancel."
+        ),
+        color=discord.Color.orange()
+    )
+    confirm_embed.set_footer(text="This action cannot be undone!")
+    await ctx.send(embed=confirm_embed)
+    bot.clean_pending = True
+    bot.clean_requester = ctx.author.id
+    bot.clean_target = target
+
+    await asyncio.sleep(30)
+    if hasattr(bot, 'clean_pending') and bot.clean_pending:
+        bot.clean_pending = False
+        try:
+            await ctx.send("❌ Clean cancelled — timed out after 30 seconds.")
+        except:
+            pass
+
+
+@bot.command()
+async def confirmclean(ctx):
+    if not hasattr(bot, 'clean_pending') or not bot.clean_pending:
+        await ctx.send("❌ No clean pending! Run `!clean` first.")
+        return
+    if ctx.author.id != bot.clean_requester:
+        await ctx.send("❌ Only the person who ran `!clean` can confirm it!")
+        return
+
+    bot.clean_pending = False
+    target: discord.TextChannel = bot.clean_target
+
+    progress_msg = await ctx.send(f"🧹 Cleaning {target.mention}... please wait!")
+
+    try:
+        # Clone the channel (preserves settings, wipes messages)
+        new_channel = await target.clone(reason=f"Channel cleaned by {ctx.author}")
+        await target.delete(reason=f"Channel cleaned by {ctx.author}")
+        await new_channel.edit(position=target.position)
+        await new_channel.send(
+            embed=discord.Embed(
+                title="🧹 Channel Cleaned",
+                description=f"All messages have been removed by {ctx.author.mention}.",
+                color=discord.Color.green()
+            )
+        )
+        # Edit original progress message if it's in a different channel, otherwise it's gone
+        if ctx.channel.id != target.id:
+            await progress_msg.edit(content=f"✅ {new_channel.mention} has been cleaned!")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to manage that channel!")
+    except Exception as e:
+        await ctx.send(f"❌ Something went wrong: {e}")
+
+
+@bot.command()
+async def cancelclean(ctx):
+    if not hasattr(bot, 'clean_pending') or not bot.clean_pending:
+        await ctx.send("❌ No clean pending.")
+        return
+    if ctx.author.id != bot.clean_requester:
+        await ctx.send("❌ Only the person who ran `!clean` can cancel it!")
+        return
+    bot.clean_pending = False
+    await ctx.send("❌ Channel clean cancelled.")
+
+
+@bot.command()
 @commands.has_permissions(administrator=True)
 async def nuke(ctx):
     # Only server owner can nuke
