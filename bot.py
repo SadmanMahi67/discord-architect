@@ -664,6 +664,10 @@ class SetupModal(discord.ui.Modal, title="🏗️ Server Setup"):
                 categories_summary += "\n**🎟️ TICKETS** *(will be added)*\n┗ 💬 ticket system\n"
             if wants_stats:
                 categories_summary += "\n**📊 SERVER STATS** *(will be added)*\n┗ 📈 live stats channels\n"
+            # INFO is always added for every template
+            categories_summary += "\n**📌 INFO** *(always added)*\n┗ 📜 rules (react ✅ to get Member role)\n"
+            if self.template_key == 'community':
+                categories_summary += "\n**📋 COMMUNITY** *(added)*\n┗ 📢 announcements, forums\n"
 
             all_roles = server_template.get("roles", [])
             staff_roles = [r["name"] for r in all_roles if r.get("type") in ["admin", "moderator", "member"]]
@@ -1039,6 +1043,9 @@ async def generate_server_plan(ctx, user_input: str):
                 icon = "🔊" if ch["type"] == "voice" else "💬"
                 categories_summary += f"{prefix} {icon} {ch['name']}\n"
 
+        # INFO is always added for every template
+        categories_summary += "\n**📌 INFO** *(always added)*\n┗ 📜 rules (react ✅ to get Member role)\n"
+
         all_roles = server_template.get("roles", [])
         staff_roles = [r["name"] for r in all_roles if r.get("type") in ["admin", "moderator", "member"]]
         decorative_roles = [r["name"] for r in all_roles if r.get("type") == "decorative"]
@@ -1280,6 +1287,30 @@ async def confirm(ctx):
         # COMMUNITY category additionally created for the community template
         if is_community_template:
             await create_community_channels(guild, role_objects, template, created)
+
+        # Step 4b — Lock server: hide everything from @everyone, give Member access
+        # @everyone can only see INFO (rules gate). Once they get Member they see the rest.
+        await progress_msg.edit(content="🔒 Applying permission gates...")
+        await asyncio.sleep(0.5)
+        # Hide @everyone from ALL categories/channels server-wide
+        await guild.edit(default_message_notifications=discord.NotificationLevel.only_mentions)
+        for cat in guild.categories:
+            await cat.set_permissions(guild.default_role, read_messages=False)
+            await asyncio.sleep(0.2)
+        # Grant Member role read+write access to all non-INFO categories
+        if member_role:
+            for cat in guild.categories:
+                if cat.name == "📌 INFO":
+                    # INFO is already read-only for Member via create_info_category
+                    continue
+                await cat.set_permissions(
+                    member_role,
+                    read_messages=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    add_reactions=True
+                )
+                await asyncio.sleep(0.2)
 
         roles_channel = await guild.create_text_channel(
             name=template.get("roles_channel", "get-your-roles"),
@@ -4427,6 +4458,34 @@ async def create_info_category(guild: discord.Guild, role_objects: dict = None,
     category = await guild.create_category("📌 INFO", position=position)
     if created is not None:
         created["categories"].append(category.id)
+    # INFO is visible to everyone (@everyone can read but not write)
+    # @everyone: can see INFO so they know where to go to get their role
+    await category.set_permissions(
+        guild.default_role,
+        read_messages=True,
+        send_messages=False,
+        add_reactions=True
+    )
+    # Resolve member role and make INFO read-only for them too
+    member_role = None
+    if role_objects and template:
+        for r in template.get("roles", []):
+            if r.get("type") == "member" and r["name"] in role_objects:
+                member_role = role_objects[r["name"]]
+                break
+    if not member_role:
+        member_role = discord.utils.find(
+            lambda r: r.name.lower() in ("member", "members") and not r.managed,
+            guild.roles
+        )
+    if member_role:
+        await category.set_permissions(
+            member_role,
+            read_messages=True,
+            send_messages=False,
+            read_message_history=True,
+            add_reactions=True
+        )
     await create_rules_channel(guild, category, role_objects, template, created)
     return category
 
