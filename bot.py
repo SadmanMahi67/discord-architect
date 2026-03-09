@@ -199,7 +199,7 @@ SERVER_TEMPLATES = {
         "emoji": "💼",
         "label": "Business",
         "description": "A professional workspace with project and team channels",
-        "hint": "professional business server with project channels, team meetings, announcements and file sharing"
+        "hint": "professional business server with project channels, team meetings, client communication and file sharing"
     },
     "creative": {
         "emoji": "🎨",
@@ -210,8 +210,8 @@ SERVER_TEMPLATES = {
     "community": {
         "emoji": "🏘️",
         "label": "Community",
-        "description": "A community hub with announcements, suggestions, bug reports and reviews",
-        "hint": "community server with announcements, suggestions, bug reports, reviews, general discussion and events"
+        "description": "A community hub with suggestions, bug reports, reviews and events",
+        "hint": "community server with suggestions, bug reports, reviews, general discussion and events"
     },
     "custom": {
         "emoji": "🎲",
@@ -290,6 +290,7 @@ Rules:
 - Always include a welcome channel in the General category as the first channel
 - Always include a text channel named "general" (general member chat) immediately after welcome in the General category
 - Always include a text channel named "bot-commands" (for public bot command usage by members) in the General category
+- Never include an announcements channel in any category — announcements are handled separately via !addcommunity
 - Always include at least one voice channel per category
 - Always include exactly these role types: admin, moderator, member
 - Add 3-5 decorative roles that match the server theme (type: decorative)
@@ -902,6 +903,11 @@ async def on_guild_available(guild):
         if rules_msg_id:
             bot.rules_cache[str(guild.id)] = {"message_id": int(rules_msg_id)}
 
+        # Load decoration mode used during setup (so !edit matches the server style)
+        decoration_mode = data.get("decoration_mode")
+        if decoration_mode:
+            bot.setup_decoration_mode = decoration_mode
+
         await enforce_color_role_priority(guild, color_roles)
 
     except Exception as e:
@@ -1224,15 +1230,7 @@ async def confirm(ctx):
         if admin_role:
             await ctx.author.add_roles(admin_role)
 
-        # Give everyone else Member
-        if member_role:
-            for m in ctx.guild.members:
-                if m == ctx.author or m.bot:
-                    continue
-                await m.add_roles(member_role)
-                await asyncio.sleep(0.3)
-
-        # Save member role id for future joins
+        # Save member role id (used for reaction-role gate and servers without rules channel)
         bot.member_role_id = member_role.id if member_role else None
         if member_role:
             save_state({"member_role_id": member_role.id})
@@ -1279,7 +1277,7 @@ async def confirm(ctx):
         await progress_msg.edit(content="🏗️ Setting up info & roles channels...")
         is_community_template = getattr(bot, 'selected_template', '') == 'community'
         if is_community_template:
-            anchor_category = await create_community_channels(guild, role_objects, template)
+            anchor_category = await create_community_channels(guild, role_objects, template, created)
         else:
             anchor_category = await create_info_category(guild, created)
 
@@ -1325,7 +1323,8 @@ async def confirm(ctx):
                 "categories": created["categories"],
                 "channels": created["channels"]
             },
-            "last_template": template
+            "last_template": template,
+            "decoration_mode": getattr(bot, 'setup_decoration_mode', 'full')
         })
 
         embed = discord.Embed(
@@ -1508,8 +1507,11 @@ async def undo(ctx):
 
 @bot.event
 async def on_member_join(member):
-    # Auto assign member role if it exists
-    if hasattr(bot, 'member_role_id') and bot.member_role_id:
+    # Only auto-assign Member if this guild has no rules reaction-gate configured.
+    # If a rules channel exists, they must react ✅ to earn the Member role.
+    guild_id = str(member.guild.id)
+    has_rules_gate = bool(bot.rules_cache.get(guild_id))
+    if not has_rules_gate and hasattr(bot, 'member_role_id') and bot.member_role_id:
         member_role = member.guild.get_role(bot.member_role_id)
         if member_role:
             try:
@@ -2144,37 +2146,62 @@ class AddChannelModal(discord.ui.Modal, title="➕ Add Channel"):
         ch_type = self.channel_type.value.strip().lower() or "text"
         topic = self.channel_topic.value.strip()
 
+        decoration_mode = getattr(bot, 'setup_decoration_mode', 'full')
+
+        if decoration_mode == 'none':
+            system_content = (
+                "You are a Discord channel name formatter. "
+                "Return ONLY a plain lowercase channel name with hyphens. "
+                "No emoji, no decoration, no brackets. "
+                "Examples: general, game-chat, voice-lounge"
+            )
+        elif decoration_mode == 'minimal':
+            system_content = (
+                "You are a Discord channel name formatter. "
+                "Use a single emoji followed by ・ as a prefix. "
+                "For text channels: 💬・ or a fitting emoji. "
+                "For voice channels: 🔊・ "
+                "For forum channels: 💡・ or a fitting emoji. "
+                "Return ONLY the formatted name, lowercase with hyphens."
+            )
+        else:
+            system_content = (
+                "You are a Discord channel name formatter. "
+                "Given a channel name and its category, return a decorated channel name "
+                "that matches the style of the category. "
+                "For text channels use emoji prefix like 「🎮」or 📺・ "
+                "For voice channels start with 🔊・ "
+                "For forum channels use a fitting emoji like 「💡」or 「📝」. "
+                "Return ONLY the formatted channel name, nothing else. "
+                "Keep it lowercase with hyphens."
+            )
+
         try:
             response = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a Discord channel name formatter. "
-                            "Given a channel name and its category, return a decorated channel name "
-                            "that matches the style of the category. "
-                            "For text channels use emoji prefix like 「🎮」or 📺・ "
-                            "For voice channels start with 🔊・ "
-                            "For forum channels use a fitting emoji like 「💡」or 「📝」. "
-                            "Return ONLY the formatted channel name, nothing else. "
-                            "Keep it lowercase with hyphens."
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Category: {self.category.name}\nChannel name: {name}\nType: {ch_type}"
-                    }
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": f"Category: {self.category.name}\nChannel name: {name}\nType: {ch_type}"}
                 ]
             )
             formatted_name = response.choices[0].message.content.strip().strip('"')
         except:
-            if ch_type == "voice":
-                formatted_name = f"🔊・{name.lower().replace(' ', '-')}"
-            elif ch_type == "forum":
-                formatted_name = f"「💡」{name.lower().replace(' ', '-')}"
+            if decoration_mode == 'none':
+                formatted_name = name.lower().replace(' ', '-')
+            elif decoration_mode == 'minimal':
+                if ch_type == "voice":
+                    formatted_name = f"🔊・{name.lower().replace(' ', '-')}"
+                elif ch_type == "forum":
+                    formatted_name = f"💡・{name.lower().replace(' ', '-')}"
+                else:
+                    formatted_name = f"💬・{name.lower().replace(' ', '-')}"
             else:
-                formatted_name = f"「💬」{name.lower().replace(' ', '-')}"
+                if ch_type == "voice":
+                    formatted_name = f"🔊・{name.lower().replace(' ', '-')}"
+                elif ch_type == "forum":
+                    formatted_name = f"「💡」{name.lower().replace(' ', '-')}"
+                else:
+                    formatted_name = f"「💬」{name.lower().replace(' ', '-')}"
 
         try:
             if ch_type == "voice":
@@ -2202,13 +2229,20 @@ class AddChannelModal(discord.ui.Modal, title="➕ Add Channel"):
                     topic=topic if topic else None
                 )
 
+            # Track in undo history
+            if not hasattr(bot, 'last_build') or not bot.last_build:
+                data = await db_load(str(guild.id))
+                bot.last_build = data.get("last_build") or {"roles": [], "categories": [], "channels": []}
+            bot.last_build.setdefault("channels", []).append(channel.id)
+            await db_save(str(guild.id), {"last_build": bot.last_build})
+
             embed = discord.Embed(
                 title="✅ Channel Created!",
                 color=discord.Color.green()
             )
             embed.add_field(name="Name", value=channel.name, inline=True)
             embed.add_field(name="Category", value=self.category.name, inline=True)
-            embed.add_field(name="Type", value="🔊 Voice" if ch_type == "voice" else ("📝 Forum" if ch_type == "forum" else "💬 Text"), inline=True)
+            embed.add_field(name="Type", value="🔊 Voice" if ch_type == "voice" else ("📋 Forum" if ch_type == "forum" else "💬 Text"), inline=True)
             if topic:
                 embed.add_field(name="Topic", value=topic, inline=False)
             await interaction.followup.send(embed=embed)
@@ -2237,33 +2271,73 @@ class AddCategoryModal(discord.ui.Modal, title="➕ Add Category"):
         guild = interaction.guild
         name = self.category_name.value.strip()
 
+        decoration_mode = getattr(bot, 'setup_decoration_mode', 'full')
+
+        # Category name AI prompt based on decoration mode
+        if decoration_mode == 'none':
+            cat_system = (
+                "You are a Discord category name formatter. "
+                "Return ONLY the category name in plain uppercase with no emoji or decoration. "
+                "Examples: MUSIC ZONE, GAMING, STUDY HUB"
+            )
+        elif decoration_mode == 'minimal':
+            cat_system = (
+                "You are a Discord category name formatter. "
+                "Return the category name in uppercase with a single fitting emoji prefix. "
+                "Examples: 🎵 MUSIC ZONE, 🎮 GAMING, 📚 STUDY HUB"
+            )
+        else:
+            cat_system = (
+                "You are a Discord category name formatter. "
+                "Given a category name, return a decorated version with "
+                "emoji borders like: ╔══〔 🎵 MUSIC ZONE 〕══╗ "
+                "Return ONLY the formatted name, nothing else."
+            )
+
+        # Channel name AI prompt based on decoration mode
+        if decoration_mode == 'none':
+            ch_system = (
+                "You are a Discord channel name formatter. "
+                "Return ONLY a plain lowercase channel name with hyphens. No emoji or decoration."
+            )
+        elif decoration_mode == 'minimal':
+            ch_system = (
+                "You are a Discord channel name formatter. "
+                "Use a single emoji followed by ・ as prefix. "
+                "For text: 💬・ or fitting emoji. For voice: 🔊・ For forum: 💡・ "
+                "Return ONLY the formatted name, lowercase with hyphens."
+            )
+        else:
+            ch_system = (
+                "You are a Discord channel name formatter. "
+                "For text channels use emoji prefix like 「💬」or 📝・. "
+                "For voice channels start with 🔊・. "
+                "For forum channels use 「💡」or similar with 「」brackets. "
+                "Return ONLY the formatted name, lowercase with hyphens."
+            )
+
         try:
             response = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a Discord category name formatter. "
-                            "Given a category name, return a decorated version with "
-                            "emoji borders like: ╔══〔 🎵 MUSIC ZONE 〕══╗ "
-                            "Return ONLY the formatted name, nothing else."
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Category name: {name}"
-                    }
+                    {"role": "system", "content": cat_system},
+                    {"role": "user", "content": f"Category name: {name}"}
                 ]
             )
             formatted_name = response.choices[0].message.content.strip().strip('"')
         except:
-            formatted_name = f"〔 {name.upper()} 〕"
+            if decoration_mode == 'none':
+                formatted_name = name.upper()
+            elif decoration_mode == 'minimal':
+                formatted_name = f"📁 {name.upper()}"
+            else:
+                formatted_name = f"〔 {name.upper()} 〕"
 
         try:
             category = await guild.create_category(formatted_name)
 
             # Create initial channels if provided
+            new_channel_ids = []
             channels_created = []
             channels_input = self.initial_channels.value.strip()
             if channels_input:
@@ -2287,45 +2361,52 @@ class AddCategoryModal(discord.ui.Modal, title="➕ Add Category"):
                         ch_resp = groq_client.chat.completions.create(
                             model="llama-3.3-70b-versatile",
                             messages=[
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "You are a Discord channel name formatter. "
-                                        "For text channels use emoji prefix like 「💬」or 📝・. "
-                                        "For voice channels start with 🔊・. "
-                                        "For forum channels use 「💡」or similar. "
-                                        "Return ONLY the formatted name, lowercase with hyphens."
-                                    )
-                                },
-                                {
-                                    "role": "user",
-                                    "content": f"Category: {formatted_name}\nChannel: {ch_name}\nType: {ch_type}"
-                                }
+                                {"role": "system", "content": ch_system},
+                                {"role": "user", "content": f"Category: {formatted_name}\nChannel: {ch_name}\nType: {ch_type}"}
                             ]
                         )
                         formatted_ch = ch_resp.choices[0].message.content.strip().strip('"')
                     except:
-                        if ch_type == "voice":
-                            formatted_ch = f"🔊・{ch_name.lower().replace(' ', '-')}"
-                        elif ch_type == "forum":
-                            formatted_ch = f"「💡」{ch_name.lower().replace(' ', '-')}"
+                        if decoration_mode == 'none':
+                            formatted_ch = ch_name.lower().replace(' ', '-')
+                        elif decoration_mode == 'minimal':
+                            if ch_type == 'voice':
+                                formatted_ch = f"🔊・{ch_name.lower().replace(' ', '-')}"
+                            elif ch_type == 'forum':
+                                formatted_ch = f"💡・{ch_name.lower().replace(' ', '-')}"
+                            else:
+                                formatted_ch = f"💬・{ch_name.lower().replace(' ', '-')}"
                         else:
-                            formatted_ch = f"「💬」{ch_name.lower().replace(' ', '-')}"
+                            if ch_type == "voice":
+                                formatted_ch = f"🔊・{ch_name.lower().replace(' ', '-')}"
+                            elif ch_type == "forum":
+                                formatted_ch = f"「💡」{ch_name.lower().replace(' ', '-')}"
+                            else:
+                                formatted_ch = f"「💬」{ch_name.lower().replace(' ', '-')}"
 
                     try:
                         if ch_type == "voice":
-                            await guild.create_voice_channel(formatted_ch, category=category)
+                            ch = await guild.create_voice_channel(formatted_ch, category=category)
                         elif ch_type == "forum":
                             try:
-                                await guild.create_forum(formatted_ch, category=category)
+                                ch = await guild.create_forum(formatted_ch, category=category)
                             except Exception:
-                                await guild.create_text_channel(formatted_ch, category=category)
+                                ch = await guild.create_text_channel(formatted_ch, category=category)
                         else:
-                            await guild.create_text_channel(formatted_ch, category=category)
+                            ch = await guild.create_text_channel(formatted_ch, category=category)
                         channels_created.append(formatted_ch)
+                        new_channel_ids.append(ch.id)
                     except Exception as ch_e:
                         print(f"⚠️ Could not create channel {formatted_ch}: {ch_e}")
                     await asyncio.sleep(0.4)
+
+            # Track in undo history
+            if not hasattr(bot, 'last_build') or not bot.last_build:
+                data = await db_load(str(guild.id))
+                bot.last_build = data.get("last_build") or {"roles": [], "categories": [], "channels": []}
+            bot.last_build.setdefault("categories", []).append(category.id)
+            bot.last_build.setdefault("channels", []).extend(new_channel_ids)
+            await db_save(str(guild.id), {"last_build": bot.last_build})
 
             embed = discord.Embed(
                 title="✅ Category Created!",
@@ -4311,7 +4392,7 @@ async def ensure_general_channels(guild: discord.Guild, created: dict):
 
 # ── COMMUNITY CHANNELS HELPER ─────────────────────────────────────────────────────────────────
 
-async def create_community_channels(guild: discord.Guild, role_objects: dict = None, template: dict = None) -> discord.CategoryChannel:
+async def create_community_channels(guild: discord.Guild, role_objects: dict = None, template: dict = None, created: dict = None) -> discord.CategoryChannel:
     """Create the 📋 COMMUNITY category with rules, announcements, and forum channels."""
     existing = discord.utils.get(guild.categories, name="📋 COMMUNITY")
     if existing:
@@ -4321,6 +4402,8 @@ async def create_community_channels(guild: discord.Guild, role_objects: dict = N
     has_stats = discord.utils.get(guild.categories, name="📊 SERVER STATS 📊") is not None
     position = 1 if has_stats else 0
     category = await guild.create_category("📋 COMMUNITY", position=position)
+    if created is not None:
+        created["categories"].append(category.id)
     guild_id = str(guild.id)
 
     # Resolve admin / mod roles
@@ -4356,6 +4439,8 @@ async def create_community_channels(guild: discord.Guild, role_objects: dict = N
             rules_ch = await guild.create_text_channel(
                 name=ch_name, category=category, topic=ch_topic, overwrites=overwrites
             )
+            if created is not None:
+                created["channels"].append(rules_ch.id)
             await asyncio.sleep(0.5)
 
             # Post the default rules embed
@@ -4399,24 +4484,28 @@ async def create_community_channels(guild: discord.Guild, role_objects: dict = N
                     overwrites[admin_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
                 if mod_role:
                     overwrites[mod_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
-            await guild.create_text_channel(
+            text_ch = await guild.create_text_channel(
                 name=ch_name,
                 category=category,
                 topic=ch_topic,
                 overwrites=overwrites if overwrites else discord.utils.MISSING
             )
+            if created is not None:
+                created["channels"].append(text_ch.id)
             await asyncio.sleep(0.5)
 
         elif ch_type == "forum":
             try:
-                await guild.create_forum(
+                forum_ch = await guild.create_forum(
                     name=ch_name,
                     category=category,
                     topic=ch_topic if ch_topic else discord.utils.MISSING
                 )
             except Exception as e:
                 print(f"⚠️ Forum channel fallback for {ch_name}: {e}")
-                await guild.create_text_channel(name=ch_name, category=category, topic=ch_topic)
+                forum_ch = await guild.create_text_channel(name=ch_name, category=category, topic=ch_topic)
+            if created is not None:
+                created["channels"].append(forum_ch.id)
             await asyncio.sleep(0.5)
 
     return category
@@ -4436,7 +4525,16 @@ async def addcommunity(ctx):
 
     progress = await ctx.send("📋 Creating community channels...")
     try:
-        community_cat = await create_community_channels(guild)
+        community_created = {"roles": [], "categories": [], "channels": []}
+        community_cat = await create_community_channels(guild, created=community_created)
+
+        # Update undo history with newly created community channels
+        if not hasattr(bot, 'last_build') or not bot.last_build:
+            loaded = await db_load(str(guild.id))
+            bot.last_build = loaded.get("last_build") or {"roles": [], "categories": [], "channels": []}
+        bot.last_build.setdefault("categories", []).extend(community_created["categories"])
+        bot.last_build.setdefault("channels", []).extend(community_created["channels"])
+        await db_save(str(guild.id), {"last_build": bot.last_build})
 
         # Move orphan get-your-roles / tickets channels into the community category
         moved = []
@@ -4503,7 +4601,7 @@ class AnnounceSetupView(discord.ui.View):
         # Channel select (built-in Discord channel picker)
         channel_select = discord.ui.ChannelSelect(
             placeholder="📢 Target channel (leave blank = post here)...",
-            channel_types=[discord.ChannelType.text],
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
             min_values=0,
             max_values=1,
             custom_id="announce_channel_pick"
