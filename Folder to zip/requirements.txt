@@ -1,7 +1,0 @@
-discord.py
-python-dotenv
-groq
-Pillow
-aiohttp
-motor
-pymongo

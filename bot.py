@@ -222,10 +222,11 @@ SERVER_TEMPLATES = {
 }
 
 COMMUNITY_CHANNELS = [
+    {"name": "「�」rules", "type": "rules", "topic": "Server rules — react ✅ to gain access"},
     {"name": "「📢」announcements", "type": "text", "topic": "Official server announcements — only staff can post here", "staff_post_only": True},
-    {"name": "「💡」suggestions", "type": "text", "topic": "Share your ideas and suggestions for the server"},
-    {"name": "「🐛」bug-reports", "type": "text", "topic": "Report bugs or issues you find"},
-    {"name": "「⭐」reviews", "type": "text", "topic": "Leave your reviews and feedback"}
+    {"name": "「💡」suggestions", "type": "forum", "topic": "Share your ideas and suggestions for the server"},
+    {"name": "「🐛」bug-reports", "type": "forum", "topic": "Report bugs or issues you find"},
+    {"name": "「⭐」reviews", "type": "forum", "topic": "Leave your reviews and feedback"}
 ]
 
 # ── Prompt + Role Panel Helpers ───────────────────────────────────────────────
@@ -287,6 +288,8 @@ Rules:
 - Include 3-5 channels per category
 - Always include a General category
 - Always include a welcome channel in the General category as the first channel
+- Always include a text channel named "general" (general member chat) immediately after welcome in the General category
+- Always include a text channel named "bot-commands" (for public bot command usage by members) in the General category
 - Always include at least one voice channel per category
 - Always include exactly these role types: admin, moderator, member
 - Add 3-5 decorative roles that match the server theme (type: decorative)
@@ -836,6 +839,7 @@ async def on_ready():
     bot.xp_cooldowns = {}
     bot.spam_tracker = {}
     bot.automod_cache = {}
+    bot.rules_cache = {}
 
     state = load_state()
 
@@ -847,7 +851,7 @@ async def on_ready():
         TicketConfirmCloseView(),
         GuideView(),
         ConfirmBuildView(),
-        AnnounceButtonView()
+        AnnounceCardView()
     ]
     for view in views_to_register:
         try:
@@ -892,6 +896,12 @@ async def on_guild_available(guild):
         automod_config = data.get("automod", {})
         if automod_config:
             bot.automod_cache[str(guild.id)] = automod_config
+
+        # Cache rules message ID for reaction-role
+        rules_msg_id = data.get("rules_message_id")
+        if rules_msg_id:
+            bot.rules_cache[str(guild.id)] = {"message_id": int(rules_msg_id)}
+
         await enforce_color_role_priority(guild, color_roles)
 
     except Exception as e:
@@ -938,6 +948,54 @@ async def on_guild_role_delete(role: discord.Role):
         await sync_roles_panel(role.guild)
     except Exception as e:
         print(f"⚠️ Role delete sync failed in {role.guild.name}: {e}")
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    """Grant Member role when a user reacts ✅ on the rules message."""
+    if payload.user_id == bot.user.id:
+        return
+    if str(payload.emoji) != "✅":
+        return
+    if not payload.guild_id:
+        return
+
+    guild_id = str(payload.guild_id)
+    cached = bot.rules_cache.get(guild_id)
+    if not cached:
+        # Try loading from DB on cache miss (edge case after partial startup)
+        try:
+            data = await db_load(guild_id)
+            rules_msg_id = data.get("rules_message_id")
+            if rules_msg_id:
+                cached = {"message_id": int(rules_msg_id)}
+                bot.rules_cache[guild_id] = cached
+        except Exception:
+            return
+    if not cached:
+        return
+    if payload.message_id != cached.get("message_id"):
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    member = guild.get_member(payload.user_id)
+    if not member or member.bot:
+        return
+
+    try:
+        data = await db_load(guild_id)
+        member_role_id = data.get("member_role_id")
+        if not member_role_id:
+            return
+        role = guild.get_role(int(member_role_id))
+        if not role or role in member.roles:
+            return
+        await member.add_roles(role, reason="Accepted server rules")
+    except Exception as e:
+        print(f"⚠️ Could not grant Member role to {member}: {e}")
+
 
 @bot.command()
 async def hello(ctx):
@@ -1214,10 +1272,20 @@ async def confirm(ctx):
                 created["channels"].append(channel.id)
                 await asyncio.sleep(0.5)
 
-        # Step 4 — Create get-your-roles channel with only decorative roles
-        await progress_msg.edit(content="🎭 Setting up roles channel...")
+        # Ensure General category always has #general and #bot-commands
+        await ensure_general_channels(guild, created)
+
+        # Step 4 — Create info/community category then place get-your-roles inside it
+        await progress_msg.edit(content="🏗️ Setting up info & roles channels...")
+        is_community_template = getattr(bot, 'selected_template', '') == 'community'
+        if is_community_template:
+            anchor_category = await create_community_channels(guild, role_objects, template)
+        else:
+            anchor_category = await create_info_category(guild, created)
+
         roles_channel = await guild.create_text_channel(
-            name=template.get("roles_channel", "get-your-roles")
+            name=template.get("roles_channel", "get-your-roles"),
+            category=anchor_category
         )
         created["channels"].append(roles_channel.id)
 
@@ -1277,19 +1345,15 @@ async def confirm(ctx):
         embed.set_footer(text="Type !undo to revert everything • !guide to see all commands")
         await progress_msg.edit(content=None, embed=embed)
 
-        # Auto setup community channels if community template
-        if getattr(bot, 'selected_template', '') == 'community':
-            try:
-                await create_community_channels(guild, role_objects, template)
-            except Exception as e:
-                print(f"⚠️ Auto community channels setup error: {e}")
-
         # Auto setup ticket system if requested
         if getattr(bot, 'setup_wants_tickets', True):
             try:
                 existing_ticket = discord.utils.get(ctx.guild.text_channels, name="「🎫」tickets")
                 if not existing_ticket:
-                    ticket_channel = await ctx.guild.create_text_channel(name="「🎫」tickets")
+                    ticket_channel = await ctx.guild.create_text_channel(
+                        name="「🎫」tickets",
+                        category=anchor_category
+                    )
                     ticket_embed = discord.Embed(
                         title="🎫 Support Tickets",
                         description=(
@@ -2058,7 +2122,7 @@ class AddChannelModal(discord.ui.Modal, title="➕ Add Channel"):
     )
 
     channel_type = discord.ui.TextInput(
-        label="Type: text or voice",
+        label="Type: text / voice / forum",
         placeholder="text",
         required=False,
         max_length=5,
@@ -2092,6 +2156,7 @@ class AddChannelModal(discord.ui.Modal, title="➕ Add Channel"):
                             "that matches the style of the category. "
                             "For text channels use emoji prefix like 「🎮」or 📺・ "
                             "For voice channels start with 🔊・ "
+                            "For forum channels use a fitting emoji like 「💡」or 「📝」. "
                             "Return ONLY the formatted channel name, nothing else. "
                             "Keep it lowercase with hyphens."
                         )
@@ -2106,6 +2171,8 @@ class AddChannelModal(discord.ui.Modal, title="➕ Add Channel"):
         except:
             if ch_type == "voice":
                 formatted_name = f"🔊・{name.lower().replace(' ', '-')}"
+            elif ch_type == "forum":
+                formatted_name = f"「💡」{name.lower().replace(' ', '-')}"
             else:
                 formatted_name = f"「💬」{name.lower().replace(' ', '-')}"
 
@@ -2115,6 +2182,19 @@ class AddChannelModal(discord.ui.Modal, title="➕ Add Channel"):
                     name=formatted_name,
                     category=self.category
                 )
+            elif ch_type == "forum":
+                try:
+                    channel = await guild.create_forum(
+                        name=formatted_name,
+                        category=self.category,
+                        topic=topic if topic else discord.utils.MISSING
+                    )
+                except Exception:
+                    channel = await guild.create_text_channel(
+                        name=formatted_name,
+                        category=self.category,
+                        topic=topic if topic else None
+                    )
             else:
                 channel = await guild.create_text_channel(
                     name=formatted_name,
@@ -2128,7 +2208,7 @@ class AddChannelModal(discord.ui.Modal, title="➕ Add Channel"):
             )
             embed.add_field(name="Name", value=channel.name, inline=True)
             embed.add_field(name="Category", value=self.category.name, inline=True)
-            embed.add_field(name="Type", value="🔊 Voice" if ch_type == "voice" else "💬 Text", inline=True)
+            embed.add_field(name="Type", value="🔊 Voice" if ch_type == "voice" else ("📝 Forum" if ch_type == "forum" else "💬 Text"), inline=True)
             if topic:
                 embed.add_field(name="Topic", value=topic, inline=False)
             await interaction.followup.send(embed=embed)
@@ -2142,6 +2222,14 @@ class AddCategoryModal(discord.ui.Modal, title="➕ Add Category"):
         placeholder="e.g. Music Zone, Movie Night...",
         required=True,
         max_length=100
+    )
+
+    initial_channels = discord.ui.TextInput(
+        label="Initial Channels (optional)",
+        placeholder="e.g. general, voice: lounge, forum: ideas",
+        required=False,
+        max_length=300,
+        style=discord.TextStyle.paragraph
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -2174,11 +2262,82 @@ class AddCategoryModal(discord.ui.Modal, title="➕ Add Category"):
 
         try:
             category = await guild.create_category(formatted_name)
+
+            # Create initial channels if provided
+            channels_created = []
+            channels_input = self.initial_channels.value.strip()
+            if channels_input:
+                for entry in channels_input.split(","):
+                    entry = entry.strip()
+                    if not entry:
+                        continue
+                    entry_lower = entry.lower()
+                    if entry_lower.startswith("voice:"):
+                        ch_name = entry[6:].strip()
+                        ch_type = "voice"
+                    elif entry_lower.startswith("forum:"):
+                        ch_name = entry[6:].strip()
+                        ch_type = "forum"
+                    else:
+                        ch_name = entry
+                        ch_type = "text"
+
+                    # AI-format the channel name
+                    try:
+                        ch_resp = groq_client.chat.completions.create(
+                            model="llama-3.3-70b-versatile",
+                            messages=[
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "You are a Discord channel name formatter. "
+                                        "For text channels use emoji prefix like 「💬」or 📝・. "
+                                        "For voice channels start with 🔊・. "
+                                        "For forum channels use 「💡」or similar. "
+                                        "Return ONLY the formatted name, lowercase with hyphens."
+                                    )
+                                },
+                                {
+                                    "role": "user",
+                                    "content": f"Category: {formatted_name}\nChannel: {ch_name}\nType: {ch_type}"
+                                }
+                            ]
+                        )
+                        formatted_ch = ch_resp.choices[0].message.content.strip().strip('"')
+                    except:
+                        if ch_type == "voice":
+                            formatted_ch = f"🔊・{ch_name.lower().replace(' ', '-')}"
+                        elif ch_type == "forum":
+                            formatted_ch = f"「💡」{ch_name.lower().replace(' ', '-')}"
+                        else:
+                            formatted_ch = f"「💬」{ch_name.lower().replace(' ', '-')}"
+
+                    try:
+                        if ch_type == "voice":
+                            await guild.create_voice_channel(formatted_ch, category=category)
+                        elif ch_type == "forum":
+                            try:
+                                await guild.create_forum(formatted_ch, category=category)
+                            except Exception:
+                                await guild.create_text_channel(formatted_ch, category=category)
+                        else:
+                            await guild.create_text_channel(formatted_ch, category=category)
+                        channels_created.append(formatted_ch)
+                    except Exception as ch_e:
+                        print(f"⚠️ Could not create channel {formatted_ch}: {ch_e}")
+                    await asyncio.sleep(0.4)
+
             embed = discord.Embed(
                 title="✅ Category Created!",
-                description=f"Created category **{category.name}**",
                 color=discord.Color.green()
             )
+            embed.add_field(name="Category", value=category.name, inline=False)
+            if channels_created:
+                embed.add_field(
+                    name=f"💬 Channels Created ({len(channels_created)})",
+                    value="\n".join(f"‣ `{c}`" for c in channels_created),
+                    inline=False
+                )
             await interaction.followup.send(embed=embed)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}")
@@ -2681,14 +2840,14 @@ class GuideView(discord.ui.View):
             color=discord.Color.blue()
         )
         embed.add_field(name="!setup", value="Start building your server (includes Community template!)", inline=False)
-        embed.add_field(name="!edit", value="Open the server editor — add channels, roles, rename, delete and more!", inline=False)
+        embed.add_field(name="!edit", value="Open the server editor — add channels (text/voice/forum), categories with initial channels, roles, rename, delete and more!", inline=False)
         embed.add_field(name="!undo / !redo", value="Undo or redo the last build", inline=False)
         embed.add_field(name="!nuke", value="Wipe server clean to start fresh\nOwner only", inline=False)
         embed.add_field(name="!refreshroles", value="Fix role buttons after bot restart", inline=False)
         embed.add_field(name="!serverstats", value="Add live stats to your server", inline=False)
         embed.add_field(name="!ticket setup", value="Add a ticket system", inline=False)
-        embed.add_field(name="!addcommunity", value="Add community channels (announcements, suggestions, bug reports, reviews)", inline=False)
-        embed.add_field(name="!announce", value="Post a styled announcement with role mentions", inline=False)
+        embed.add_field(name="!addcommunity", value="Add community channels: rules (✅ reaction-role), announcements, forums for suggestions/bugs/reviews\nAlso moves orphan channels into the category", inline=False)
+        embed.add_field(name="!announce", value="Post a styled announcement — pick channel and role from dropdowns", inline=False)
         embed.set_footer(text="Architect AI • !guide for main menu")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -4097,16 +4256,74 @@ async def greroll(ctx, message_id: str):
     )
 
 
+# ── SERVER STRUCTURE HELPERS ─────────────────────────────────────────────────────────────────
+
+async def create_info_category(guild: discord.Guild, created: dict = None) -> discord.CategoryChannel:
+    """Create a 📌 INFO category at position 1 for get-your-roles and tickets (non-community builds)."""
+    existing = discord.utils.get(guild.categories, name="📌 INFO")
+    if existing:
+        return existing
+    has_stats = discord.utils.get(guild.categories, name="📊 SERVER STATS 📊") is not None
+    position = 1 if has_stats else 0
+    category = await guild.create_category("📌 INFO", position=position)
+    if created is not None:
+        created["categories"].append(category.id)
+    return category
+
+
+async def ensure_general_channels(guild: discord.Guild, created: dict):
+    """Guarantee the General category has a #general chat channel and a public #bot-commands channel."""
+    general_cat = None
+    for cat in guild.categories:
+        if "general" in cat.name.lower():
+            general_cat = cat
+            break
+    if not general_cat:
+        return
+
+    existing_names = [ch.name.lower() for ch in general_cat.text_channels]
+
+    # Check for a general chat channel (not welcome, not staff-related)
+    has_general = any(
+        "general" in n and "staff" not in n and "welcome" not in n
+        for n in existing_names
+    )
+    if not has_general:
+        ch = await guild.create_text_channel(
+            "「💬」general",
+            category=general_cat,
+            topic="General chat for everyone 💬"
+        )
+        created["channels"].append(ch.id)
+        await asyncio.sleep(0.4)
+
+    # Check for a public bot-commands channel
+    has_bot_cmds = any("bot" in n and "command" in n for n in existing_names)
+    if not has_bot_cmds:
+        ch = await guild.create_text_channel(
+            "「🤖」bot-commands",
+            category=general_cat,
+            topic="Use bot commands here 🤖"
+        )
+        created["channels"].append(ch.id)
+        await asyncio.sleep(0.4)
+
+
 # ── COMMUNITY CHANNELS HELPER ─────────────────────────────────────────────────────────────────
 
-async def create_community_channels(guild: discord.Guild, role_objects: dict = None, template: dict = None):
-    """Create the community category with announcements, suggestions, bug-reports, and reviews."""
+async def create_community_channels(guild: discord.Guild, role_objects: dict = None, template: dict = None) -> discord.CategoryChannel:
+    """Create the 📋 COMMUNITY category with rules, announcements, and forum channels."""
     existing = discord.utils.get(guild.categories, name="📋 COMMUNITY")
     if existing:
         return existing
 
-    category = await guild.create_category("📋 COMMUNITY")
+    # Place community category at position 1 (after stats at 0)
+    has_stats = discord.utils.get(guild.categories, name="📊 SERVER STATS 📊") is not None
+    position = 1 if has_stats else 0
+    category = await guild.create_category("📋 COMMUNITY", position=position)
+    guild_id = str(guild.id)
 
+    # Resolve admin / mod roles
     admin_role = discord.utils.get(guild.roles, name="Admin")
     mod_role = discord.utils.get(guild.roles, name="Moderator")
     if role_objects:
@@ -4117,26 +4334,89 @@ async def create_community_channels(guild: discord.Guild, role_objects: dict = N
                 mod_role = role_objects[r["name"]]
 
     for ch_data in COMMUNITY_CHANNELS:
-        if ch_data["type"] == "text":
+        ch_type = ch_data["type"]
+        ch_name = ch_data["name"]
+        ch_topic = ch_data.get("topic", "")
+
+        if ch_type == "rules":
+            # Read-only for everyone; staff and bot can post
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(
+                    send_messages=False, read_messages=True, add_reactions=True
+                ),
+                guild.me: discord.PermissionOverwrite(
+                    send_messages=True, read_messages=True, add_reactions=True
+                )
+            }
+            if admin_role:
+                overwrites[admin_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
+            if mod_role:
+                overwrites[mod_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
+
+            rules_ch = await guild.create_text_channel(
+                name=ch_name, category=category, topic=ch_topic, overwrites=overwrites
+            )
+            await asyncio.sleep(0.5)
+
+            # Post the default rules embed
+            rules_embed = discord.Embed(
+                title="📜 Server Rules",
+                description=(
+                    "Please read and follow these rules to keep our community safe and fun:\n\n"
+                    "**1.** 🤝 Be respectful — treat all members with kindness\n"
+                    "**2.** 🚫 No harassment, hate speech, or discrimination\n"
+                    "**3.** 💬 Keep topics relevant to the correct channels\n"
+                    "**4.** 🔞 No NSFW, explicit, or disturbing content\n"
+                    "**5.** 🔇 No spamming, flooding, or excessive caps\n"
+                    "**6.** 🔗 No malicious links, scams, or phishing\n"
+                    "**7.** 📢 Follow all staff instructions without argument\n"
+                    "**8.** 🎭 No impersonation of members or staff\n"
+                    "**9.** 🔔 No mass pinging or unnecessary role mentions\n"
+                    "**10.** 📋 Use the correct channels for your content\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "**React with ✅ below to agree and gain access to the server!**"
+                ),
+                color=discord.Color.from_rgb(255, 127, 80)
+            )
+            rules_embed.set_footer(text="By reacting you agree to follow all rules above")
+            rules_msg = await rules_ch.send(embed=rules_embed)
+            await rules_msg.add_reaction("✅")
+
+            # Persist to MongoDB so the reaction-role survives restarts
+            await db_save(guild_id, {
+                "rules_message_id": rules_msg.id,
+                "rules_channel_id": rules_ch.id
+            })
+            bot.rules_cache[guild_id] = {"message_id": rules_msg.id}
+
+        elif ch_type == "text":
             overwrites = {}
             if ch_data.get("staff_post_only"):
                 overwrites[guild.default_role] = discord.PermissionOverwrite(
                     send_messages=False, read_messages=True, add_reactions=True
                 )
                 if admin_role:
-                    overwrites[admin_role] = discord.PermissionOverwrite(
-                        send_messages=True, read_messages=True
-                    )
+                    overwrites[admin_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
                 if mod_role:
-                    overwrites[mod_role] = discord.PermissionOverwrite(
-                        send_messages=True, read_messages=True
-                    )
+                    overwrites[mod_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
             await guild.create_text_channel(
-                name=ch_data["name"],
+                name=ch_name,
                 category=category,
-                topic=ch_data.get("topic", ""),
+                topic=ch_topic,
                 overwrites=overwrites if overwrites else discord.utils.MISSING
             )
+            await asyncio.sleep(0.5)
+
+        elif ch_type == "forum":
+            try:
+                await guild.create_forum(
+                    name=ch_name,
+                    category=category,
+                    topic=ch_topic if ch_topic else discord.utils.MISSING
+                )
+            except Exception as e:
+                print(f"⚠️ Forum channel fallback for {ch_name}: {e}")
+                await guild.create_text_channel(name=ch_name, category=category, topic=ch_topic)
             await asyncio.sleep(0.5)
 
     return category
@@ -4156,16 +4436,29 @@ async def addcommunity(ctx):
 
     progress = await ctx.send("📋 Creating community channels...")
     try:
-        await create_community_channels(guild)
+        community_cat = await create_community_channels(guild)
+
+        # Move orphan get-your-roles / tickets channels into the community category
+        moved = []
+        for ch in list(guild.text_channels):
+            if ch.category_id is not None:
+                continue
+            if "get-your-roles" in ch.name or "tickets" in ch.name:
+                await ch.edit(category=community_cat)
+                moved.append(ch.name)
+                await asyncio.sleep(0.3)
+
+        moved_text = ("\n\nAlso moved into this category: " + ", ".join(f"`{m}`" for m in moved)) if moved else ""
         embed = discord.Embed(
             title="✅ Community Channels Added!",
             description=(
                 "Created **📋 COMMUNITY** category with:\n\n"
+                "📜 **rules** — react ✅ to get Member role\n"
                 "📢 **announcements** — staff-only posting\n"
-                "💡 **suggestions** — open to everyone\n"
-                "🐛 **bug-reports** — open to everyone\n"
-                "⭐ **reviews** — open to everyone\n\n"
-                "Use `!announce` in any channel to post a styled announcement!"
+                "💡 **suggestions** — forum (members post threads)\n"
+                "🐛 **bug-reports** — forum (members post threads)\n"
+                "⭐ **reviews** — forum (members post threads)\n\n"
+                "Use `!announce` to post a styled announcement!" + moved_text
             ),
             color=discord.Color.green()
         )
@@ -4177,19 +4470,96 @@ async def addcommunity(ctx):
 
 # ── !announce COMMAND + MODAL ─────────────────────────────────────────────────────────────
 
-class AnnounceButtonView(discord.ui.View):
+class AnnounceCardView(discord.ui.View):
+    """Persistent card shown by !announce. Clicking opens an ephemeral setup step."""
     def __init__(self):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="✍️ Write Announcement", style=discord.ButtonStyle.primary, custom_id="write_announcement_btn")
     async def write_announcement(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("❌ Only staff can write announcements!", ephemeral=True)
             return
-        await interaction.response.send_modal(AnnounceModal())
+        view = AnnounceSetupView(interaction.guild)
+        embed = discord.Embed(
+            title="📢 Configure Announcement",
+            description=(
+                "**1.** Pick a target channel (leave empty to post in the current channel)\n"
+                "**2.** Pick who to mention (optional)\n"
+                "**3.** Click **✍️ Continue** to write your title and message"
+            ),
+            color=discord.Color.from_rgb(255, 127, 80)
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class AnnounceSetupView(discord.ui.View):
+    """Ephemeral two-select step: choose channel + mention role, then open modal."""
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=120)
+        self.selected_channel_id = None
+        self.selected_role_value = "none"
+
+        # Channel select (built-in Discord channel picker)
+        channel_select = discord.ui.ChannelSelect(
+            placeholder="📢 Target channel (leave blank = post here)...",
+            channel_types=[discord.ChannelType.text],
+            min_values=0,
+            max_values=1,
+            custom_id="announce_channel_pick"
+        )
+        channel_select.callback = self.on_channel
+        self.add_item(channel_select)
+
+        # Mention select: @everyone / @here / No mention / guild roles
+        mention_options = [
+            discord.SelectOption(label="No mention", value="none", emoji="🔕", default=True),
+            discord.SelectOption(label="@everyone", value="everyone", emoji="📢"),
+            discord.SelectOption(label="@here", value="here", emoji="📣"),
+        ]
+        for role in reversed(guild.roles):
+            if role.is_default() or role.managed:
+                continue
+            if role.permissions.administrator:
+                continue
+            if len(mention_options) >= 25:
+                break
+            mention_options.append(discord.SelectOption(label=role.name[:100], value=f"role:{role.id}"))
+
+        role_select = discord.ui.Select(
+            placeholder="🔔 Who to mention (optional)...",
+            options=mention_options,
+            min_values=1,
+            max_values=1,
+            custom_id="announce_role_pick"
+        )
+        role_select.callback = self.on_role
+        self.add_item(role_select)
+
+    async def on_channel(self, interaction: discord.Interaction):
+        values = interaction.data.get("values", [])
+        self.selected_channel_id = int(values[0]) if values else None
+        await interaction.response.defer()
+
+    async def on_role(self, interaction: discord.Interaction):
+        values = interaction.data.get("values", [])
+        self.selected_role_value = values[0] if values else "none"
+        await interaction.response.defer()
+
+    @discord.ui.button(label="✍️ Continue", style=discord.ButtonStyle.green, custom_id="announce_continue_btn")
+    async def continue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            AnnounceModal(self.selected_channel_id, self.selected_role_value)
+        )
 
 
 class AnnounceModal(discord.ui.Modal, title="📢 Write Announcement"):
+    """Final modal: just title + message. Channel and role already chosen via dropdowns."""
+    def __init__(self, channel_id=None, role_value="none"):
+        super().__init__()
+        self.channel_id = channel_id
+        self.role_value = role_value or "none"
+
     announcement_title = discord.ui.TextInput(
         label="Title",
         placeholder="e.g. Server Update, New Event, Maintenance...",
@@ -4205,60 +4575,37 @@ class AnnounceModal(discord.ui.Modal, title="📢 Write Announcement"):
         style=discord.TextStyle.paragraph
     )
 
-    mention_role = discord.ui.TextInput(
-        label="Mention Role (everyone / here / role name)",
-        placeholder="e.g. everyone, here, Member, or leave blank",
-        required=False,
-        max_length=100
-    )
-
-    target_channel = discord.ui.TextInput(
-        label="Target Channel (blank = current channel)",
-        placeholder="e.g. announcements, general, or leave blank",
-        required=False,
-        max_length=100
-    )
-
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
         guild = interaction.guild
 
         # Resolve target channel
-        channel_name = self.target_channel.value.strip().lower().replace(" ", "-") if self.target_channel.value.strip() else None
         target = None
-        if channel_name:
-            # Try exact match first, then partial match
-            target = discord.utils.get(guild.text_channels, name=channel_name)
-            if not target:
-                target = discord.utils.find(
-                    lambda c: channel_name in c.name.lower(),
-                    guild.text_channels
-                )
+        if self.channel_id:
+            target = guild.get_channel(self.channel_id)
         if not target:
             target = interaction.channel
 
         # Resolve mention
         mention_text = ""
-        role_input = self.mention_role.value.strip().lower()
-        if role_input == "everyone":
+        if self.role_value == "everyone":
             mention_text = "@everyone"
-        elif role_input == "here":
+        elif self.role_value == "here":
             mention_text = "@here"
-        elif role_input:
-            role = discord.utils.find(
-                lambda r: r.name.lower() == role_input,
-                guild.roles
-            )
-            if role:
-                mention_text = role.mention
-            else:
-                mention_text = ""
+        elif self.role_value and self.role_value.startswith("role:"):
+            try:
+                role_id = int(self.role_value.split(":")[1])
+                role = guild.get_role(role_id)
+                if role:
+                    mention_text = role.mention
+            except (ValueError, IndexError):
+                pass
 
         # Build styled coral embed
         embed = discord.Embed(
             title=f"📢 {self.announcement_title.value}",
             description=self.announcement_message.value,
-            color=discord.Color.from_rgb(255, 127, 80)  # Coral
+            color=discord.Color.from_rgb(255, 127, 80)
         )
         embed.set_footer(
             text=f"Announced by {interaction.user.display_name}",
@@ -4287,14 +4634,14 @@ async def announce(ctx):
         description=(
             "Click the button below to write and post a styled announcement.\n\n"
             "**You can:**\n"
-            "• Set a title and message\n"
-            "• Mention @everyone, @here, or any role\n"
-            "• Choose which channel to post in\n"
+            "• Pick the target channel from a dropdown\n"
+            "• Mention @everyone, @here, or any role from a dropdown\n"
+            "• Write a custom title and message\n"
         ),
         color=discord.Color.from_rgb(255, 127, 80)
     )
     embed.set_footer(text="Only Admin and Moderator can use this")
-    await ctx.send(embed=embed, view=AnnounceButtonView())
+    await ctx.send(embed=embed, view=AnnounceCardView())
 
 
 @bot.command(name="guide")
