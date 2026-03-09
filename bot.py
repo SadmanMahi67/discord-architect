@@ -1312,9 +1312,30 @@ async def confirm(ctx):
                 )
                 await asyncio.sleep(0.2)
 
+        _info_read_only = discord.PermissionOverwrite(
+            read_messages=True,
+            send_messages=False,
+            create_public_threads=False,
+            create_private_threads=False,
+            send_messages_in_threads=False,
+            add_reactions=False
+        )
+        _info_staff = discord.PermissionOverwrite(
+            read_messages=True, send_messages=True,
+            manage_messages=True, manage_threads=True
+        )
+        _info_overwrites = {guild.default_role: _info_read_only, guild.me: _info_staff}
+        if member_role:
+            _info_overwrites[member_role] = _info_read_only
+        if admin_role:
+            _info_overwrites[admin_role] = _info_staff
+        if mod_role:
+            _info_overwrites[mod_role] = _info_staff
+
         roles_channel = await guild.create_text_channel(
             name=template.get("roles_channel", "get-your-roles"),
-            category=anchor_category
+            category=anchor_category,
+            overwrites=_info_overwrites
         )
         created["channels"].append(roles_channel.id)
 
@@ -1382,7 +1403,8 @@ async def confirm(ctx):
                 if not existing_ticket:
                     ticket_channel = await ctx.guild.create_text_channel(
                         name="「🎫」tickets",
-                        category=anchor_category
+                        category=anchor_category,
+                        overwrites=_info_overwrites
                     )
                     ticket_embed = discord.Embed(
                         title="🎫 Support Tickets",
@@ -4590,12 +4612,30 @@ async def create_community_channels(guild: discord.Guild, role_objects: dict = N
             overwrites = {}
             if ch_data.get("staff_post_only"):
                 overwrites[guild.default_role] = discord.PermissionOverwrite(
-                    send_messages=False, read_messages=True, add_reactions=True
+                    read_messages=True,
+                    send_messages=False,
+                    create_public_threads=False,
+                    create_private_threads=False,
+                    send_messages_in_threads=False,
+                    add_reactions=False
                 )
+                # Member role: same read-only restriction
+                member_role = discord.utils.find(
+                    lambda r: r.name.lower() in ("member", "members") and not r.managed,
+                    guild.roles
+                )
+                if member_role:
+                    overwrites[member_role] = overwrites[guild.default_role]
                 if admin_role:
-                    overwrites[admin_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
+                    overwrites[admin_role] = discord.PermissionOverwrite(
+                        read_messages=True, send_messages=True,
+                        create_public_threads=True, manage_threads=True
+                    )
                 if mod_role:
-                    overwrites[mod_role] = discord.PermissionOverwrite(send_messages=True, read_messages=True)
+                    overwrites[mod_role] = discord.PermissionOverwrite(
+                        read_messages=True, send_messages=True,
+                        create_public_threads=True, manage_threads=True
+                    )
             text_ch = await guild.create_text_channel(
                 name=ch_name,
                 category=category,
