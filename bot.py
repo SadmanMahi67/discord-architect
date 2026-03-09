@@ -1297,11 +1297,14 @@ async def confirm(ctx):
         for cat in guild.categories:
             await cat.set_permissions(guild.default_role, read_messages=False)
             await asyncio.sleep(0.2)
-        # Grant Member role read+write access to all non-INFO categories
+        # Grant Member role read+write access to all non-INFO, non-staff categories
         if member_role:
             for cat in guild.categories:
                 if cat.name == "📌 INFO":
                     # INFO is already read-only for Member via create_info_category
+                    continue
+                if "STAFF" in cat.name.upper():
+                    # Staff categories stay hidden from Member
                     continue
                 await cat.set_permissions(
                     member_role,
