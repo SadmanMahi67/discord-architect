@@ -1266,6 +1266,17 @@ async def confirm(ctx):
                             read_messages=True,
                             send_messages=True
                         )
+                # Always grant bot full access to the staff category so mod-logs work
+                await category.set_permissions(
+                    guild.me,
+                    read_messages=True,
+                    send_messages=True,
+                    manage_messages=True,
+                    embed_links=True,
+                    attach_files=True,
+                    read_message_history=True,
+                    manage_channels=True,
+                )
 
             for channel_data in category_data.get("channels", []):
                 if channel_data["type"] == "text":
@@ -1784,7 +1795,24 @@ async def log_mod_action(guild, action: str, moderator, target, reason: str = "N
     embed.add_field(name="Reason", value=reason, inline=False)
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.set_footer(text=f"User ID: {target.id}")
-    await log_channel.send(embed=embed)
+    try:
+        await log_channel.send(embed=embed)
+    except discord.Forbidden:
+        # Bot is missing send/embed permissions — try to fix and retry once
+        try:
+            await log_channel.set_permissions(
+                guild.me,
+                read_messages=True,
+                send_messages=True,
+                embed_links=True,
+                attach_files=True,
+                read_message_history=True,
+            )
+            await log_channel.send(embed=embed)
+        except Exception as retry_err:
+            print(f"⚠️ Cannot post to mod-logs in {guild.name}: {retry_err}")
+    except Exception as e:
+        print(f"⚠️ mod-log error in {guild.name}: {e}")
 
 
 # ── MOD COMMANDS ──────────────────────────────────────────────────────────────────────────────
