@@ -1819,6 +1819,55 @@ async def log_mod_action(guild, action: str, moderator, target, reason: str = "N
 
 @bot.command()
 @staff_only()
+async def fixmodlogs(ctx):
+    """Fix bot permissions on mod-logs so it can send embeds again."""
+    guild = ctx.guild
+    log_channel = discord.utils.get(guild.text_channels, name="「📋」mod-logs")
+    if not log_channel:
+        log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+    if not log_channel:
+        await ctx.send("❌ No **mod-logs** channel found! Make sure a channel named `mod-logs` exists.")
+        return
+
+    try:
+        await log_channel.set_permissions(
+            guild.me,
+            read_messages=True,
+            send_messages=True,
+            embed_links=True,
+            attach_files=True,
+            read_message_history=True,
+            manage_messages=True,
+        )
+        # Also fix the parent category if there is one
+        if log_channel.category:
+            await log_channel.category.set_permissions(
+                guild.me,
+                read_messages=True,
+                send_messages=True,
+                embed_links=True,
+                attach_files=True,
+                read_message_history=True,
+                manage_messages=True,
+                manage_channels=True,
+            )
+        # Send a test embed to confirm it works
+        test_embed = discord.Embed(
+            title="✅ Mod Logs Fixed!",
+            description=f"Permissions repaired by {ctx.author.mention}. Mod log messages will now appear here correctly.",
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow()
+        )
+        await log_channel.send(embed=test_embed)
+        await ctx.send(f"✅ Done! Check {log_channel.mention} — a test message was posted.")
+    except discord.Forbidden:
+        await ctx.send("❌ I don\'t have permission to edit that channel even as an admin. Make sure I have **Manage Channels** permission.")
+    except Exception as e:
+        await ctx.send(f"❌ Something went wrong: {e}")
+
+
+@bot.command()
+@staff_only()
 async def promote(ctx, member: discord.Member, *, role_type: str = "mod"):
     guild = ctx.guild
     role_type = role_type.lower().strip()
@@ -3070,6 +3119,8 @@ class GuideView(discord.ui.View):
         embed.add_field(name="!addrole / !removerole", value="Manually add or remove roles", inline=False)
         embed.add_field(name="!automod", value="Open the auto-mod control panel\nConfigure spam, caps, links, banned words and more", inline=False)
         embed.add_field(name="!announce", value="Post a styled announcement — choose title, message, role ping & channel", inline=False)
+        embed.add_field(name="!clean [#channel]", value="Delete all messages in a channel (staff only, requires confirmation)", inline=False)
+        embed.add_field(name="!fixmodlogs", value="Repair bot permissions on #mod-logs if actions aren't being logged", inline=False)
         embed.set_footer(text="All actions logged in #mod-logs • !guide for main menu")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
