@@ -63,6 +63,16 @@ async def db_load(guild_id: str) -> dict:
         print(f"⚠️ DB load error: {e}")
         return {}
 
+async def check_mongodb_connection() -> bool:
+    """Ping MongoDB once during startup so connection issues are obvious in logs."""
+    try:
+        await mongo_client.admin.command("ping")
+        print("✅ MongoDB connected successfully")
+        return True
+    except Exception as e:
+        print(f"❌ MongoDB connection failed: {e}")
+        return False
+
 async def automod_warn(guild: discord.Guild, member: discord.Member, reason: str):
     guild_id = str(guild.id)
     user_id = str(member.id)
@@ -836,6 +846,7 @@ class RoleView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
+    await check_mongodb_connection()
 
     # Initialize cooldowns first before anything else
     bot.xp_cooldowns = {}
@@ -888,7 +899,7 @@ async def on_guild_available(guild):
         if decorative_roles or color_roles:
             bot.add_view(RoleView(decorative_roles, []))
             bot.add_view(RoleView([], color_roles))
-            print(f"✅ Loaded role views for {guild.name}")
+            print(f"Loaded role views for {guild.name}")
 
         member_role_id = data.get("member_role_id")
         if member_role_id:
@@ -912,7 +923,7 @@ async def on_guild_available(guild):
         await enforce_color_role_priority(guild, color_roles)
 
     except Exception as e:
-        print(f"⚠️ Could not load data for {guild.name}: {e}")
+        print(f"Could not load data for {guild.name}: {e}")
 
 
 @bot.event

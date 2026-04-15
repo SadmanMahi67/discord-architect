@@ -1,0 +1,14 @@
+services:
+  bot:
+    build: .
+    container_name: discord_bot
+    restart: always # Automatically restarts when Docker Desktop starts at system login
+    # Set the timezone to match the user's host machine (optional but recommended)
+    environment:
+      - TZ=UTC # Or local timezone if needed
+    # Map the current directory to /app for persistence
+    volumes:
+      - .:/app
+    # Load environment variables from the existing .env file
+    env_file:
+      - .env
